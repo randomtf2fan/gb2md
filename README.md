@@ -19,6 +19,14 @@ It selects a `.gb`/`.gbc` file, output folder, and trace budget, then streams th
 compiler's output and errors into the window. Generated files default to
 `gui-builds/<rom-name>/`; the original ROM is never modified.
 
+### AI Assistance Disclosure
+
+GB2MD was developed with substantial assistance from AI coding tools, primarily OpenAI Codex.
+
+AI assistance was used for code generation, debugging, optimization, testing, and documentation. The project's direction, requirements, testing on real hardware, and development decisions were guided and reviewed by the project maintainer.
+
+As with any software developed using automated tools, bugs and inaccuracies may remain. Contributions, bug reports, and independent code reviews are welcome.
+
 ```sh
 python3 gb2md_gui.py
 ```
