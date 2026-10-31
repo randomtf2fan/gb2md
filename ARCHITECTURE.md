@@ -1,0 +1,322 @@
+# GB2MD architecture
+
+This guide describes the current GB2MD implementation. It is written for a
+developer who knows Python but is new to native recompilers, the Game Boy
+SM83/LR35902 CPU, and Motorola 68000 assembly.
+
+## What GB2MD is
+
+GB2MD translates discovered Game Boy instructions into Motorola 68000 machine
+code and packages that code with a Genesis-side hardware runtime. It is not an
+SM83 interpreter: source instructions become labelled native 68000 blocks in
+`translated_trace.s`. The runtime supplies services for operations that do not
+have a direct 68000 equivalent, such as cartridge banking, Game Boy memory and
+I/O, interrupts, timers, controller input, and conversion of Game Boy graphics
+to Genesis VDP data.
+
+The current design is trace-guided rather than a complete ahead-of-time static
+compiler. Dynamic execution finds active ROM banks, computed targets, and
+RAM-resident code. Conservative static passes then add recognized reachable
+code that a finite trace did not execute. Consequently, a successful build is
+not proof that every future path was compiled.
+
+## End-to-end pipeline
+
+The normal command is implemented by `build_recompiled.py`:
+
+```text
+owned .gb/.gbc ROM
+        |
+        v
+Python execution and trace discovery (`compile_trace`)
+        |
+        +-- dynamic (bank, PC) instruction entries
+        +-- controller/input exploration snapshots
+        +-- direct control-flow and pointer-table closure
+        v
+semantic instruction records (`trace-profile.json`)
+        |
+        v
+native lowering (`native_body`) -> `translated_trace.s`
+        |
+        +-- Genesis runtime (`runtime_68000.s`)
+        +-- source cartridge data (`gb_cart_rom`)
+        +-- generated colour/frame/renderer tables
+        v
+vasm Motorola syntax assembler
+        |
+        v
+Genesis header, padding, checksum -> `recompiled.md`
+```
+
+`build_recompiled.build()` coordinates these stages. It calls
+`trace_recompiler.compile_trace()`, writes generated assembly includes, embeds
+the input ROM as cartridge data for runtime reads, invokes `vasmm68k_mot`, pads
+the image, updates the Genesis ROM extent and checksum, and writes
+`build-report.json`.
+
+`gb2md.py` is an older, deliberately conservative bank-0 decoder and title-ROM
+scaffold. Its `instruction_length()`, cartridge tables, and memory-plan helpers
+are still shared, but the playable native path is `build_recompiled.py` plus
+`trace_recompiler.py`.
+
+## The Python execution oracle
+
+`gb_cpu.py` contains the reference `CPU` and `Memory` classes used during
+discovery and compatibility testing.
+
+- `CPU.step()` executes one instruction or interrupt and applies its T-cycle
+  cost from `instruction_cycles()`.
+- `CPU._step_base()` implements SM83 instruction semantics, flags, delayed
+  `EI`, `DI`, `HALT`, interrupt entry, stack operations, and control flow.
+- `Memory.read()` and `Memory.write()` implement the Game Boy address map,
+  JOYP, mapper registers, WRAM/VRAM/OAM/HRAM, timer registers, and interrupt
+  registers.
+- `Memory.tick()` advances DIV/TIMA, approximate LY, and VBlank state.
+
+This is an executable reference for tracing and tests, not a frontend included
+in the generated ROM. It currently approximates parts of the hardware: OAM DMA
+is atomic, PPU modes and access restrictions are incomplete, and LY is a
+scanline approximation.
+
+`gb_memory.py` contains a more explicit `MBC3` model, including RAM/RTC select
+and latching, used as specification/test code. The native runtime currently
+implements only a subset of those MBC3 services.
+
+## Dynamic tracing and block identity
+
+`trace_recompiler.compile_trace()` starts a fresh `Memory` and `CPU` for the
+ordinary no-input scenario and for every manual `--input-script` scenario. A
+fixed `--steps N` budget is per scenario. `--auto-steps` continues the same
+scenario state in chunks while dynamic coverage grows, bounded by its maximum
+and plateau settings.
+
+`trace_step()` records the instruction at the current `(bank, PC)` before
+calling `CPU.step()`. Bank zero identifies the fixed `$0000-$3FFF` window;
+the selected mapper bank identifies execution in `$4000-$7FFF`. The instruction
+bytes, hit counts, dynamic HRAM values, register state, and stopping reason feed
+`trace-profile.json`.
+
+Dynamic tracing is essential for computed control flow and RAM/HRAM code, but
+it cannot establish whole-program reachability. Games may wait indefinitely
+for input or select a target from data that a particular run never exercised.
+
+## Automatic controller exploration
+
+Automatic input exploration is enabled with `--auto-inputs`.
+
+`reads_joypad()` recognizes instructions whose effective read address is
+`$FF00` (P1/JOYP). Immediately before eligible reads,
+`capture_input_state()` saves a deep copy of the CPU and memory. Snapshots are
+deduplicated with `exploration_state_key()`, which includes CPU registers,
+interrupt/HALT state, mapper state, timing phase, writable memory, I/O, and
+external RAM. Excluding relevant state here could incorrectly merge snapshots
+whose future behavior differs.
+
+The explorer branches from selected snapshots using bounded actions from
+`AUTO_INPUT_ACTIONS`, including individual buttons, directions, and a small set
+of useful combinations. Each press is followed by release because
+`joypad_state` returns to `$FF` after `input_hold_frames`. New `(bank, PC)`
+blocks merge into the global trace.
+
+Paths sometimes require two inputs even when the first input executes no new
+code. The explorer therefore retains a small quota of deduplicated non-novel
+**bridge states** per depth. Novel states remain higher priority. Branch count,
+depth, instructions per branch, total exploration instructions, hold duration,
+snapshot interval/count, and bridge quota bound the search. The generated ROM
+does not replay exploration inputs; it polls the real Genesis controller.
+
+## Static control-flow closure
+
+After tracing, `compile_trace()` runs a worklist over discovered ROM entries.
+It follows fallthroughs and both outcomes of direct conditional branches, plus
+direct jumps, calls, returns-with-fallthrough, reset vectors, and safe constant
+successors. This is why collision outcomes need not all occur in an exact
+input trace.
+
+Separate conservative recognizers handle two ROM dispatch shapes. The first is:
+
+```text
+LD HL, pointer_table
+CALL index_helper
+JP (HL)
+```
+
+It reads no more than 64 little-endian entries, requires at least two valid ROM
+code pointers, and stops at the first invalid candidate. Targets are reported
+separately as `indirect_table_targets`. This fixed an indirect Tetris piece
+dispatch path, but it is not a general solution for all computed jumps or bank
+tracking. Expanding it requires false-positive and banking regressions.
+
+The second recognizes an exact SM83 inline table-call handler reached through
+`RST`: the handler pops the stacked return address, indexes the pointer table
+immediately following the `RST`, and jumps to the selected routine. Once this
+exact handler and at least two valid bounded pointers are present, the inline
+bytes are treated as data rather than ordinary RST fallthrough. Reports split
+these discoveries into `hl_pointer_table_targets` and
+`rst_inline_table_targets`, while `indirect_table_targets` remains the unique
+aggregate.
+
+For dynamically copied HRAM code, static closure accepts an instruction only
+when every byte at that address had one stable observed value. Conflicting
+dynamic code raises an error rather than silently compiling the wrong bytes.
+
+## Native SM83-to-68000 lowering
+
+`lr35902_lowering.family()` maps SM83 opcodes into semantic families such as
+`LD_R_R`, `ADD_A_R`, `CALL`, `CB`, and `DAA`. `native_body()` in
+`trace_recompiler.py` lowers supported families into Motorola syntax.
+
+Game Boy registers and flags live in fixed Genesis work-RAM locations such as
+`gb_a`, `gb_f`, `gb_h`, and `gb_sp`; the 68000 CCR is not treated as the Game
+Boy flag register. Memory operations call `gb_read8` or `gb_write8`. Direct
+constant successors are threaded through generated `gb_chain_*` stubs to avoid
+the general dispatcher on every instruction. Returns, indirect jumps, mapper
+changes, interrupts, and uncertain control flow use a balanced `(bank, PC)`
+dispatch tree.
+
+Generated blocks publish their Game Boy T-cycle cost in `gb_step_cycles`.
+Straight-line chains accumulate up to `SCHEDULER_BATCH_T_CYCLES` in 68000
+register `d7`, then call `gb_tick` at a scheduling boundary. Timing-sensitive
+I/O, delayed `EI`, HALT, branches, and possible interrupts force earlier
+synchronization.
+
+## Genesis runtime and memory mapping
+
+`runtime_68000.s` owns all target-side Game Boy state. Important regions are:
+
+| Game Boy concept | Genesis implementation |
+|---|---|
+| CPU registers, PC, SP, flags | Fixed fields beginning at `$FF0000` |
+| I/O registers | `gb_io` at `$FF0100` |
+| HRAM | `gb_hram` at `$FF0180` |
+| OAM shadow | `gb_oam` at `$FF0200` |
+| 8 KiB VRAM shadow | `gb_vram` at `$FF0300` |
+| 8 KiB WRAM/echo backing | `gb_wram` at `$FF2300` |
+| Cartridge ROM | `gb_cart_rom` in the Genesis ROM image |
+
+`gb_read8` and `gb_write8` route logical 16-bit Game Boy addresses to these
+regions. ROM-window reads use `gb_rom_bank`; writes below `$8000` update the
+implemented mapper state. MBC1/MBC3 low ROM-bank selection works, but complete
+RAM enable/banking, MBC1 modes, MBC3 RTC, persistence, and broader mapper
+semantics are incomplete in the native runtime.
+
+There is intentionally no direct mapping from Game Boy VRAM to `$C00000`.
+`$C00000` is the Genesis VDP data port, not byte-addressable video memory.
+
+## Timing, interrupts, HALT, and polling loops
+
+`gb_tick` consumes `gb_step_cycles` plus batched straight-line cycles. It
+advances the divider, TIMA overflow/reload events, approximate scanlines and
+LY, raises VBlank, applies delayed `EI`, wakes HALT, and enters the highest
+priority enabled interrupt. The current timer model passes the project’s
+Mooneye timer subset in both Python and native execution.
+
+`gb_idle_wait` and `gb_idle_ly` accelerate recognized read-only polling loops
+to an event boundary. They are deliberately conservative: timer-active or
+interrupt-incompatible cases fall back to normal translated execution. The
+current frame scheduler advances simulated Game Boy time as fast as native
+work completes; there is not yet a calibrated real-time pacing layer. Native
+throughput is therefore a compatibility and performance concern.
+
+`gb_halt_wait` handles a separate, very common case: a halted CPU waiting for
+the next VBlank interrupt. When LCD and VBlank IRQ are enabled and TIMA is
+disabled, it advances directly to the next LY 144 boundary, raises VBlank,
+renders dirty graphics, and lets `gb_tick` perform normal wake/interrupt
+service. Timer-active or unsupported cases retain four-cycle scheduling. The
+counter at `$FF0044` records uses of this path. This changed the measured Super
+Mario Land probe from 1.32 to 33.4 simulated GB fps without altering the timer
+suite; it is event batching, not an artificial clock multiplier.
+
+OAM DMA is currently copied atomically in both oracle and runtime. Real DMG DMA
+takes about 160 machine cycles and restricts CPU bus access. This known gap is
+the shared cause category for fourteen remaining Mooneye instruction-timing
+failures.
+
+## Graphics and controller input
+
+Game Boy VRAM and OAM writes set dirty flags. At a VBlank-like boundary,
+`gb_render_frame` converts 2bpp Game Boy tiles through
+`gb_2bpp_nibble_table`, uploads the selected 32x32 background map into the
+centered 160x144 viewport, maps DMG palettes into Genesis CRAM, applies scroll,
+and converts 40 OAM objects into Genesis sprite attributes. OAM-only changes
+skip full tile and background conversion.
+
+The renderer supports backgrounds, scroll, DMG palettes, and basic 8x8/8x16
+sprites with flips and behind-background priority. The Game Boy window layer,
+accurate PPU modes, per-scanline effects, access restrictions, and strict
+viewport sprite clipping remain incomplete. These gaps can be visually
+significant even when CPU execution continues.
+
+`gb_read_joypad` converts the Genesis pad’s active-low signals into the selected
+Game Boy JOYP row. Genesis B/C map to Game Boy A/B and Genesis A/Start map to
+Select/Start. Trace discovery inputs never appear in this routine.
+
+## Missing-native-block diagnostics
+
+If dispatch cannot find `(gb_bank, gb_pc)`, `gb_missing_block` writes marker
+`$BADB10C0` at `$FF0018`, increments `gb_missing_count` at `$FF0038` once, and
+loops while preserving the Game Boy bank, PC, and registers. This distinguishes
+incomplete trace coverage from a slow transition, a deliberate wait loop, or a
+rendering defect. It is a diagnostic trap, not a recovery mechanism.
+
+## GUI
+
+`gb2md_gui.py` is a thin PyQt5 wrapper, not a second compiler. `compiler_command()`
+constructs the `build_recompiled.py` invocation. `ConverterWindow` uses
+`QProcess` to stream logs, cancel a build, and open its output directory. It
+exposes fixed/automatic step budgets and automatic-input limits. Generated GUI
+outputs default under `gui-builds/`; output inside immutable `test_roms/` is
+rejected.
+
+## Testing infrastructure
+
+Focused unit and smoke tests live in `tests/`. They cover CPU semantics,
+lowering, automatic budgets and inputs, static closure, generated runtime
+properties, GUI command construction, and build behavior.
+
+`run_compat_tests.py` discovers immutable ROM fixtures and keeps Python and
+native results separate:
+
+- `run_python()` executes documented Blargg serial or Mooneye register
+  protocols with instruction/frame/loop limits and records full diagnostics.
+- `compile_native()` assembles only Python-passing tests but leaves them
+  `NOT_RUN` until a native success condition is observed.
+- `run_native_blastem()` currently observes Mooneye Fibonacci register
+  signatures through the BlastEm debugger.
+- `write_report()` produces JSON status counts and per-ROM details.
+
+A ROM drawing a recognizable image or reaching a loop is not automatically a
+PASS. Screenshot suites, native Blargg serial observation, and broad native
+differential testing remain unfinished.
+
+## Current capability boundary
+
+Working and verified at the time of writing:
+
+- All 56 focused unit/smoke tests pass.
+- Eleven individual Blargg CPU tests pass in the Python oracle.
+- Thirteen Mooneye timer tests and `bits/reg_f` pass in Python and verified
+  native Genesis execution.
+- The automatic Tetris checkpoint boots, accepts real controller input, enters
+  A-Type play, scores, clears lines, survived an extended manual session, and
+  completes the reproduced forced-top-out/game-over route.
+
+Incomplete or unresolved:
+
+- Tetris still runs below real Game Boy speed; measured throughput is the
+  current bottleneck. Pause, B-Type, audio, and exact top clipping remain
+  unverified.
+- Trace/static closure cannot yet prove or discover all computed targets.
+- OAM DMA bus behavior, PPU timing/modes/STAT/window/clipping, audio, complete
+  mapper RAM/RTC/persistence, and native Blargg serial observation are missing.
+- Super Mario Land's HALT-loop slowdown is fixed and its last known `F2`
+  instructions lower natively. World 1-1 now renders recognizably, but native
+  execution remains in dispatcher state `$0F` while the oracle reaches `$11`;
+  gameplay still needs a general differential fix. Pokémon Red and the tested Bad Apple demo currently
+  render black in their native builds.
+
+The design rule for all fixes is to reproduce the smallest general hardware or
+compiler error, repair the shared implementation, and add a regression. Game
+titles, hashes, individual PCs, and game-state addresses must not enter the
+general compiler/runtime as compatibility shortcuts.

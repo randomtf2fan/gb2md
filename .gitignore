@@ -1,0 +1,66 @@
+# GB2MD public-repository safety defaults.
+#
+# Mega Drive ROMs use the .md suffix, so do not add a global "*.md" rule:
+# root Markdown documentation must remain trackable. Generated ROM locations
+# and filenames are ignored explicitly below.
+
+# User-supplied/cartridge ROMs and locally downloaded compatibility fixtures.
+/*.gb
+/*.gbc
+/test_roms/
+
+# Generated builds, private working checkpoints, traces, and test results.
+/build-*/
+/local-builds/
+/gui-builds/
+/compat-results/
+/checkpoints/
+
+# Locally installed third-party tools. Obtain these from their own upstreams;
+# do not vendor binaries or source into the future GB2MD repository by accident.
+/blastem*/
+/vasm/
+
+# Generated ROM images outside the conventional build directories.
+**/recompiled.md
+**/title_screen.md
+**/*_title_demo.md
+*.gen
+*.smd
+*.rom
+
+# Generated compiler/assembler products when a custom output directory is used.
+**/trace-profile.json
+**/build-report.json
+**/memory-plan.json
+**/translated_trace.s
+**/translated_bank0.s
+**/recompiled_rom.s
+**/unimplemented_68000.s
+**/renderer_table.s
+**/frame_data.s
+**/color_profile.s
+*.lst
+*.map
+*.log
+*.ppm
+*.bin
+
+# Python/test/editor caches and local environments.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.idea/
+.vscode/
+*~
+*.swp
+
+# Platform metadata.
+.DS_Store
+Thumbs.db
