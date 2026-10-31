@@ -153,15 +153,6 @@ SHA-1 `2f41da094676bd7bf95d5d485eeff084dbbf1870`. Its forced-top-out native
 regression returns to the normal state with zero missing blocks. The matching
 checkpoint is `checkpoints/tetris-halt-fast-forward-2f41da09.md`.
 
-## What the two cited “ports” establish
-
-I could not locate a Genesis homebrew port of either *Super Mario Land* or
-*Metroid II* to audit. The readily available *Super Mario Land* project is a
-Watara Supervision (65C02) rewrite, and AM2R is a modern PC remake—not Genesis
-implementations. Treating either as evidence of a Genesis hardware mapping would
-be a false premise. This repository therefore documents an independent mapping,
-based on the official Genesis memory map and Pan Docs.
-
 ## Architecture decision
 
 | Game Boy region | Genesis implementation |
