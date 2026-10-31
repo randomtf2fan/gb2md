@@ -23,9 +23,7 @@ compiler's output and errors into the window. Generated files default to
 python3 gb2md_gui.py
 ```
 
-PyQt5 is already available as `python-pyqt5` on the current Manjaro development
-machine. On another Arch/Manjaro installation use `sudo pacman -S python-pyqt5`.
-On Windows or other Python environments, use
+For installation, use
 `python -m pip install -r requirements-gui.txt` before launching the GUI.
 
 The resulting Genesis image is `<output folder>/recompiled.md`. The CLI remains
@@ -41,17 +39,6 @@ non-commercial redistribution and contain additional module copyrights, so it
 should be obtained and built separately unless redistribution permission and
 all obligations are reviewed. BlastEm is optional and likewise treated as an
 external local test dependency.
-
-The `test_roms/` collection and all input `.gb`/`.gbc` files are local fixtures
-and are ignored by the repository safety rules. The 56 focused unit tests use
-synthetic data and do not require commercial ROMs. Compatibility-suite runs
-require the user to supply the relevant test ROMs separately.
-
-Generated `recompiled.md` files are Mega Drive ROM binaries, not Markdown.
-They include source cartridge data needed by runtime banked reads and therefore
-must not be published when built from a commercial game. Build directories,
-checkpoints, traces, screenshots, logs, and compatibility results are private
-generated artifacts and are ignored by `.gitignore`.
 
 GB2MD does not include or grant rights to commercial game ROMs or Nintendo
 assets, and it is not affiliated with or endorsed by Nintendo or Sega. Users
