@@ -129,17 +129,6 @@ Discovery scripts may also include a generic reference-only memory event such
 as `poke:0xCA22-0xCA2B=0x8C@850`. This is useful for deterministic rare-state
 coverage; it is never embedded in or replayed by the generated ROM.
 
-The follow-up `build-tetris-auto-input-v3/recompiled.md` adds conservative
-closure for an exact SM83 `RST` inline table-call convention. It fixes the
-reproduced Tetris game-over missing-block route without adding a title, hash,
-or address rule. The separate `run_tetris_gameover_regression.py` tool can
-reproduce the reference loss path and audit a generated trace profile.
-
-`build-tetris-auto-input-v4/recompiled.md` is the current-runtime rebuild,
-SHA-1 `2f41da094676bd7bf95d5d485eeff084dbbf1870`. Its forced-top-out native
-regression returns to the normal state with zero missing blocks. The matching
-checkpoint is `checkpoints/tetris-halt-fast-forward-2f41da09.md`.
-
 ## Architecture decision
 
 | Game Boy region | Genesis implementation |
