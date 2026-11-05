@@ -357,6 +357,28 @@ class SmokeTest(unittest.TestCase):
         self.assertIn("move.l #$BADB10C0,$FF0018",runtime)
         self.assertIn("addq.l #1,gb_missing_count",runtime)
 
+    def test_halt_wait_batches_masked_timer_without_skipping_timer_events(self):
+        runtime=(ROOT/"runtime_68000.s").read_text()
+        section=runtime.split("gb_halt_wait:",1)[1].split("gb_idle_ly:",1)[0]
+        self.assertIn("btst #2,gb_io+$07",section)
+        self.assertIn("btst #2,gb_ie",section)
+        self.assertIn(".halt_timer_batch:",section)
+        self.assertIn("cmpi.l #32760,d1",section)
+        self.assertIn("move.w #32760,d7",section)
+        self.assertIn("sub.l d0,d1",section)
+        self.assertIn("bsr.w gb_tick",section)
+        self.assertIn("tst.b gb_halted",section)
+
+    def test_tick_consumes_all_div_and_scanline_boundaries_in_large_batches(self):
+        runtime=(ROOT/"runtime_68000.s").read_text()
+        section=runtime.split("gb_tick:",1)[1].split("gb_render_frame:",1)[0]
+        self.assertIn("andi.w #$00FF,d0",section)
+        self.assertIn("lsr.w #8,d1",section)
+        self.assertIn(".scanline_loop:",section)
+        self.assertIn("subi.w #456,d0",section)
+        self.assertIn(".scanlines_done:",section)
+        self.assertIn("move.w d0,gb_ly_accum",section)
+
     def test_auto_inputs_can_cross_non_novel_bridge_state(self):
         import trace_recompiler as trace
         rom=bytearray(0x8000)

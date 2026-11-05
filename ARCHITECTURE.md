@@ -220,13 +220,14 @@ work completes; there is not yet a calibrated real-time pacing layer. Native
 throughput is therefore a compatibility and performance concern.
 
 `gb_halt_wait` handles a separate, very common case: a halted CPU waiting for
-the next VBlank interrupt. When LCD and VBlank IRQ are enabled and TIMA is
-disabled, it advances directly to the next LY 144 boundary, raises VBlank,
-renders dirty graphics, and lets `gb_tick` perform normal wake/interrupt
-service. Timer-active or unsupported cases retain four-cycle scheduling. The
-counter at `$FF0044` records uses of this path. This changed the measured Super
-Mario Land probe from 1.32 to 33.4 simulated GB fps without altering the timer
-suite; it is event batching, not an artificial clock multiplier.
+the next VBlank interrupt. With TIMA disabled it advances directly to the next
+LY 144 boundary. With TIMA enabled but its interrupt masked, it advances in
+large bounded chunks through `gb_tick`, preserving DIV, TIMA overflow/reload,
+LY, VBlank, rendering, and interrupt state. If the timer interrupt is enabled,
+the conservative four-cycle path remains because an intermediate timer event
+can wake HALT. `gb_tick` consumes every DIV and scanline boundary crossed by a
+large batch. The counter at `$FF0044` records uses of these paths. This is event
+batching, not an artificial clock multiplier.
 
 OAM DMA is currently copied atomically in both oracle and runtime. Real DMG DMA
 takes about 160 machine cycles and restricts CPU bus access. This known gap is
@@ -294,7 +295,7 @@ differential testing remain unfinished.
 
 Working and verified at the time of writing:
 
-- All 56 focused unit/smoke tests pass.
+- All 58 focused unit/smoke tests pass.
 - Eleven individual Blargg CPU tests pass in the Python oracle.
 - Thirteen Mooneye timer tests and `bits/reg_f` pass in Python and verified
   native Genesis execution.

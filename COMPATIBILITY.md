@@ -66,6 +66,27 @@ Current-session regression reports:
 
 ## Super Mario Land investigation
 
+### Timer-active HALT follow-up (2026-11-05)
+
+The state `$0F` route was reproduced with scripted native controller bindings.
+TAC was enabled (`$07`) but its interrupt was masked in `IE=$03`; the CPU was
+halted at source PC `$0297`. The old scheduler therefore rejected its VBlank
+fast path and advanced peripherals four T-cycles at a time. `$C0D7` did make
+progress, so the observed freeze was principally native throughput rather than
+missing coverage.
+
+The runtime now batches this masked-timer case through the normal timer event
+logic and handles every DIV/scanline boundary crossed by a large batch. Timer
+IRQ-enabled waits still use the conservative fallback. A private candidate
+leaves state `$0F` and renders World 1-1 without a missing-block trap. The later
+initialization countdown is still slow and the timer remains at 400, so
+gameplay is not a PASS. Commercial-ROM build artifacts are not published.
+
+All 58 focused tests pass. Mooneye timer remains 13/13 native PASS (12 at 600
+observation frames and `div_write` at its established 2,500-frame window).
+This is a performance/correctness improvement, not a full resolution of the
+previously documented native/Python route differences.
+
 The older GUI build had 6,892 blocks and two unlowered `LDH A,(C)` (`F2`)
 instructions. General direct native lowering now covers that instruction. The
 same automatic exploration settings discover 7,476 valid blocks, all native,

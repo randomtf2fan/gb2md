@@ -181,9 +181,9 @@ miscompiled. It does not copy the input ROM into output artifacts.
 - PPU modes, STAT behavior, window rendering, access restrictions, audio,
   complete cartridge RAM/RTC/persistence, and some indirect control flow are
   incomplete.
-- Tetris v4 is the strongest gameplay regression. Super Mario Land v3 renders
-  World 1-1 but remains at native dispatcher state `$0F`/`IE=$03`, while the
-  Python oracle reaches state `$11`/`IE=$07`.
+- Tetris v4 is the strongest gameplay regression. The current Super Mario Land
+  candidate leaves the former timer-active state `$0F` stall and renders World
+  1-1, but later initialization remains slow and gameplay is not verified.
 - Pokémon Red and the tested Bad Apple demo do not yet produce playable native
   results. See [COMPATIBILITY.md](COMPATIBILITY.md) for measured evidence.
 

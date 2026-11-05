@@ -517,7 +517,44 @@ gb_halt_wait:
 	btst #7,gb_io+$40
 	beq.w .halt_wait_done
 	btst #2,gb_io+$07
+	beq.s .halt_direct_vblank
+	; A running timer still needs every divider edge and overflow/reload event,
+	; but it cannot wake HALT when the timer IRQ is masked in IE. Advance in
+	; bounded chunks through the ordinary event-driven tick path. gb_tick can
+	; consume multiple DIV and scanline boundaries; the word-sized cycle input
+	; keeps each chunk at or below 32760 T-cycles.
+	btst #2,gb_ie
 	bne.w .halt_wait_done
+	addq.l #1,gb_halt_fast_forward_count
+.halt_timer_batch:
+	moveq #0,d0
+	move.b gb_io+$44,d0
+	cmpi.w #144,d0
+	blo.s .halt_timer_before_vblank
+	move.w #298,d1
+	sub.w d0,d1
+	bra.s .halt_timer_lines_ready
+.halt_timer_before_vblank:
+	move.w #144,d1
+	sub.w d0,d1
+.halt_timer_lines_ready:
+	mulu #456,d1
+	moveq #0,d0
+	move.w gb_ly_accum,d0
+	sub.l d0,d1
+	clr.b gb_step_cycles
+	cmpi.l #32760,d1
+	bls.s .halt_timer_last_chunk
+	move.w #32760,d7
+	bra.s .halt_timer_chunk_ready
+.halt_timer_last_chunk:
+	move.w d1,d7
+.halt_timer_chunk_ready:
+	bsr.w gb_tick
+	tst.b gb_halted
+	bne.s .halt_timer_batch
+	bra.w .halt_wait_done
+.halt_direct_vblank:
 	addq.l #1,gb_halt_fast_forward_count
 	moveq #0,d0
 	move.b gb_io+$44,d0
@@ -627,16 +664,24 @@ gb_tick:
 	move.b gb_io+$04,d4
 	lsl.w #8,d4
 	or.w gb_div_accum,d4
-	add.w d6,gb_div_accum
-	cmpi.w #256,gb_div_accum
-	blo.s .no_div
-	subi.w #256,gb_div_accum
-	addq.b #1,gb_io+$04
-.no_div:
-	add.w d6,gb_ly_accum
-	cmpi.w #456,gb_ly_accum
-	blo.s .no_scanline
-	subi.w #456,gb_ly_accum
+	moveq #0,d0
+	move.w gb_div_accum,d0
+	add.w d6,d0
+	move.w d0,d1
+	andi.w #$00FF,d0
+	move.w d0,gb_div_accum
+	lsr.w #8,d1
+	add.b d1,gb_io+$04
+	; Large event-batched waits can span many scanlines. Consume each crossed
+	; boundary so LY wrapping, VBlank, and dirty-frame rendering still happen
+	; at the same emulated boundary rather than once per host-side tick call.
+	moveq #0,d0
+	move.w gb_ly_accum,d0
+	add.w d6,d0
+.scanline_loop:
+	cmpi.w #456,d0
+	blo.s .scanlines_done
+	subi.w #456,d0
 	addq.b #1,gb_io+$44
 	cmpi.b #154,gb_io+$44
 	blo.s .ly_in_range
@@ -652,6 +697,9 @@ gb_tick:
 	bsr.w gb_render_frame
 	clr.b gb_video_dirty
 .no_scanline:
+	bra.s .scanline_loop
+.scanlines_done:
+	move.w d0,gb_ly_accum
 	; Event-driven timer: advance directly to the next four-cycle reload or
 	; selected-divider falling edge. This is cycle-exact without iterating over
 	; every T-cycle in timer-enabled games.
