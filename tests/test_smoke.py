@@ -357,12 +357,16 @@ class SmokeTest(unittest.TestCase):
         self.assertIn("move.l #$BADB10C0,$FF0018",runtime)
         self.assertIn("addq.l #1,gb_missing_count",runtime)
 
-    def test_halt_wait_batches_masked_timer_without_skipping_timer_events(self):
+    def test_halt_wait_batches_to_earliest_timer_or_vblank_wake_event(self):
         runtime=(ROOT/"runtime_68000.s").read_text()
         section=runtime.split("gb_halt_wait:",1)[1].split("gb_idle_ly:",1)[0]
         self.assertIn("btst #2,gb_io+$07",section)
         self.assertIn("btst #2,gb_ie",section)
         self.assertIn(".halt_timer_batch:",section)
+        self.assertIn("move.w gb_timer_accum,d2",section)
+        self.assertIn("sub.w d3,d5",section)
+        self.assertIn("addq.l #4,d2",section)
+        self.assertIn("cmp.l d1,d2",section)
         self.assertIn("cmpi.l #32760,d1",section)
         self.assertIn("move.w #32760,d7",section)
         self.assertIn("sub.l d0,d1",section)

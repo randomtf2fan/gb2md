@@ -220,14 +220,15 @@ work completes; there is not yet a calibrated real-time pacing layer. Native
 throughput is therefore a compatibility and performance concern.
 
 `gb_halt_wait` handles a separate, very common case: a halted CPU waiting for
-the next VBlank interrupt. With TIMA disabled it advances directly to the next
-LY 144 boundary. With TIMA enabled but its interrupt masked, it advances in
-large bounded chunks through `gb_tick`, preserving DIV, TIMA overflow/reload,
-LY, VBlank, rendering, and interrupt state. If the timer interrupt is enabled,
-the conservative four-cycle path remains because an intermediate timer event
-can wake HALT. `gb_tick` consumes every DIV and scanline boundary crossed by a
-large batch. The counter at `$FF0044` records uses of these paths. This is event
-batching, not an artificial clock multiplier.
+an interrupt. With TIMA disabled it advances directly to the next LY 144
+boundary. With TIMA enabled, it calculates the earlier of VBlank and the next
+enabled timer interrupt from TIMA, TAC, DIV phase, and any pending reload. It
+advances in bounded chunks through `gb_tick`, preserving DIV, TIMA
+overflow/reload, LY, VBlank, rendering, and interrupt state, then lets normal
+interrupt selection wake the CPU. If the timer interrupt is masked, VBlank is
+the next modeled wake event. `gb_tick` consumes every DIV and scanline boundary
+crossed by a large batch. The counter at `$FF0044` records uses of these paths.
+This is event batching, not an artificial clock multiplier.
 
 OAM DMA is currently copied atomically in both oracle and runtime. Real DMG DMA
 takes about 160 machine cycles and restricts CPU bus access. This known gap is
@@ -312,9 +313,9 @@ Incomplete or unresolved:
 - OAM DMA bus behavior, PPU timing/modes/STAT/window/clipping, audio, complete
   mapper RAM/RTC/persistence, and native Blargg serial observation are missing.
 - Super Mario Land's HALT-loop slowdown is fixed and its last known `F2`
-  instructions lower natively. World 1-1 now renders recognizably, but native
-  execution remains in dispatcher state `$0F` while the oracle reaches `$11`;
-  gameplay still needs a general differential fix. Pokémon Red and the tested Bad Apple demo currently
+  instructions lower natively. World 1-1 now renders, advances its timer, and
+  responds to sustained Right movement. Longer gameplay and exact pacing still
+  need verification. Pokémon Red and the tested Bad Apple demo currently
   render black in their native builds.
 
 The design rule for all fixes is to reproduce the smallest general hardware or

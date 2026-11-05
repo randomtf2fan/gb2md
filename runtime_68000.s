@@ -506,9 +506,9 @@ gb_idle_wait:
 
 ; A halted SM83 consumes no instructions while peripherals continue. Calling
 ; gb_tick once per four T-cycles is functionally useful but prohibitively slow
-; on the 68000. When VBlank is the only modelled event that can wake the CPU,
-; advance directly to its next edge. Timer-active and unsupported wake cases
-; retain the ordinary four-cycle dispatcher fallback.
+; on the 68000. With TIMA disabled, advance directly to VBlank. With TIMA
+; active, advance through gb_tick to the earlier of VBlank or the next enabled
+; timer interrupt. No source instruction exists inside either interval.
 gb_halt_wait:
 	tst.b gb_halted
 	beq.w .halt_wait_done
@@ -517,14 +517,11 @@ gb_halt_wait:
 	btst #7,gb_io+$40
 	beq.w .halt_wait_done
 	btst #2,gb_io+$07
-	beq.s .halt_direct_vblank
-	; A running timer still needs every divider edge and overflow/reload event,
-	; but it cannot wake HALT when the timer IRQ is masked in IE. Advance in
-	; bounded chunks through the ordinary event-driven tick path. gb_tick can
-	; consume multiple DIV and scanline boundaries; the word-sized cycle input
-	; keeps each chunk at or below 32760 T-cycles.
-	btst #2,gb_ie
-	bne.w .halt_wait_done
+	beq.w .halt_direct_vblank
+	; A running timer still needs every divider edge and overflow/reload event.
+	; Advance through the normal event-driven tick path. If its IRQ is enabled,
+	; stop at the reload that raises IF; otherwise VBlank is the next modelled
+	; wake event. Word-sized cycle input bounds each chunk to 32760 T-cycles.
 	addq.l #1,gb_halt_fast_forward_count
 .halt_timer_batch:
 	moveq #0,d0
@@ -542,6 +539,43 @@ gb_halt_wait:
 	moveq #0,d0
 	move.w gb_ly_accum,d0
 	sub.l d0,d1
+	; d1.l is cycles to VBlank. When the timer IRQ is enabled, derive cycles
+	; to its next overflow reload from the divider phase and TIMA value, then
+	; use the earlier event. A pending reload already has an exact countdown.
+	btst #2,gb_ie
+	beq.s .halt_timer_target_ready
+	moveq #0,d2
+	move.w gb_timer_accum,d2
+	bne.s .halt_timer_compare_target
+	move.w #256,d5
+	moveq #0,d3
+	move.b gb_io+$05,d3
+	sub.w d3,d5                    ; falling edges through the overflow edge
+	moveq #0,d3
+	move.b gb_io+$07,d3
+	andi.w #3,d3
+	add.w d3,d3
+	lea gb_timer_periods(pc),a0
+	moveq #0,d4
+	move.w (a0,d3.w),d4            ; selected falling-edge period
+	moveq #0,d3
+	move.b gb_io+$04,d3
+	lsl.w #8,d3
+	or.w gb_div_accum,d3           ; current 16-bit divider phase
+	move.l d4,d2
+	move.w d4,d0
+	subq.w #1,d0
+	and.w d3,d0
+	sub.w d0,d2                    ; cycles to the next falling edge
+	subq.w #1,d5
+	mulu d4,d5
+	add.l d5,d2
+	addq.l #4,d2                   ; overflow reload raises the timer IF bit
+.halt_timer_compare_target:
+	cmp.l d1,d2
+	bhs.s .halt_timer_target_ready
+	move.l d2,d1
+.halt_timer_target_ready:
 	clr.b gb_step_cycles
 	cmpi.l #32760,d1
 	bls.s .halt_timer_last_chunk
@@ -552,7 +586,7 @@ gb_halt_wait:
 .halt_timer_chunk_ready:
 	bsr.w gb_tick
 	tst.b gb_halted
-	bne.s .halt_timer_batch
+	bne.w .halt_timer_batch
 	bra.w .halt_wait_done
 .halt_direct_vblank:
 	addq.l #1,gb_halt_fast_forward_count
@@ -730,7 +764,7 @@ gb_tick:
 	move.b gb_io+$07,d0
 	andi.w #3,d0
 	add.w d0,d0
-	lea .timer_periods(pc),a0
+	lea gb_timer_periods(pc),a0
 	move.w (a0,d0.w),d1            ; selected falling-edge period
 	move.w d1,d2
 	subq.w #1,d2
@@ -800,7 +834,7 @@ gb_tick:
 	move.w d3,gb_pc
 .tick_done:
 	rts
-.timer_periods:
+gb_timer_periods:
 	dc.w 1024,16,64,256
 ; Convert live DMG tile data and the selected 32x32 BG map into Genesis VRAM.
 ; Plane A is at $C000; tile patterns occupy $0000-$2FFF.  The routine runs at

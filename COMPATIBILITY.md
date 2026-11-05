@@ -1,6 +1,6 @@
 # GB2MD compatibility status
 
-Last measured: 2026-10-30. A PASS means the ROM's documented serial or
+Last measured: 2026-11-05. A PASS means the ROM's documented serial or
 register signature was observed. Booting or drawing an image is not a PASS.
 `Native NOT_RUN` means no Genesis-side success protocol was observed, even if
 the ROM assembled successfully.
@@ -66,6 +66,26 @@ Current-session regression reports:
 
 ## Super Mario Land investigation
 
+### Earliest-event HALT scheduler and movement (2026-11-05)
+
+Once World 1-1 enables the timer interrupt (`IE=$07`), the earlier runtime
+fell back to four-cycle HALT polling. The general scheduler now calculates the
+earlier of the next VBlank and the next TIMA overflow/reload, advances there
+through the ordinary event-driven `gb_tick`, and lets normal interrupt entry
+wake the CPU.
+
+A private validation build reusing the 7,476/7,476 native block set reached
+gameplay, advanced TIME from 400 to 393, moved Mario from OAM X 43 to 74 under
+Right, and visibly scrolled a stable World 1-1 scene. Python reaches the same
+movement endpoint on the corresponding route. Missing-block marker and counter
+stayed zero. Commercial-ROM build artifacts are not published.
+
+The 58 focused tests pass. Native Mooneye timer remains 13/13 PASS: 12 within
+600 observation frames and `div_write` within its established 2,500-frame
+window. This establishes level movement and timer progress, not full game
+compatibility; extended play, jump/collision paths, audio, and exact pacing
+remain unverified.
+
 ### Timer-active HALT follow-up (2026-11-05)
 
 The state `$0F` route was reproduced with scripted native controller bindings.
@@ -76,8 +96,9 @@ progress, so the observed freeze was principally native throughput rather than
 missing coverage.
 
 The runtime now batches this masked-timer case through the normal timer event
-logic and handles every DIV/scanline boundary crossed by a large batch. Timer
-IRQ-enabled waits still use the conservative fallback. A private candidate
+logic and handles every DIV/scanline boundary crossed by a large batch. This
+paragraph records the preceding milestone; the earliest-event scheduler above
+supersedes its timer-IRQ-enabled fallback. A private candidate
 leaves state `$0F` and renders World 1-1 without a missing-block trap. The later
 initialization countdown is still slow and the timer remains at 400, so
 gameplay is not a PASS. Commercial-ROM build artifacts are not published.
