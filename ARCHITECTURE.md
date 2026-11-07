@@ -248,13 +248,18 @@ Game Boy VRAM and OAM writes set dirty flags. At a VBlank-like boundary,
 `gb_2bpp_nibble_table`, uploads the selected 32x32 background map into the
 centered 160x144 viewport, maps DMG palettes into Genesis CRAM, applies scroll,
 and converts 40 OAM objects into Genesis sprite attributes. OAM-only changes
-skip full tile and background conversion.
+skip tile and background conversion. Tile-map writes (`$9800-$9FFF`) dirty
+only the map; pattern writes (`$8000-$97FF`) dirty pattern data. Scroll,
+palette, and map-only refreshes therefore avoid converting and uploading all
+640 Genesis patterns. Plane A's transparent outside area is initialized once.
 
 The renderer supports backgrounds, scroll, DMG palettes, and basic 8x8/8x16
 sprites with flips and behind-background priority. The Game Boy window layer,
 accurate PPU modes, per-scanline effects, access restrictions, and strict
 viewport sprite clipping remain incomplete. These gaps can be visually
-significant even when CPU execution continues.
+significant even when CPU execution continues. Pattern dirtiness is still
+coarse: any pattern-byte change uploads all patterns rather than only the
+affected tile.
 
 `gb_read_joypad` converts the Genesis pad’s active-low signals into the selected
 Game Boy JOYP row. Genesis B/C map to Game Boy A/B and Genesis A/Start map to

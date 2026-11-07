@@ -177,6 +177,8 @@ miscompiled. It does not copy the input ROM into output artifacts.
 - Native memory helpers, bank-aware dispatch, MBC1/MBC3 ROM selection, timer
   scheduling, interrupts, a DMG-to-VDP renderer, controller input, Genesis ROM
   headers/checksums, and bounded automatic input exploration are implemented.
+- Tile maps and tile patterns have separate dirty paths, avoiding redundant
+  full pattern uploads during scrolling and map-only updates.
 - OAM DMA is still atomic and lacks the real 160-machine-cycle CPU bus lock.
 - PPU modes, STAT behavior, window rendering, access restrictions, audio,
   complete cartridge RAM/RTC/persistence, and some indirect control flow are

@@ -232,9 +232,18 @@ class SmokeTest(unittest.TestCase):
 
     def test_oam_only_frames_skip_full_background_conversion(self):
         runtime=(ROOT/"runtime_68000.s").read_text()
-        for symbol in ("gb_vram_dirty", "gb_oam_dirty", "gb_bg_dirty", ".sprite_section:"):
+        for symbol in ("gb_vram_dirty", "gb_oam_dirty", "gb_bg_dirty",
+                       "gb_plane_initialized", ".render_tilemap:", ".sprite_section:"):
             self.assertIn(symbol,runtime)
         self.assertIn("beq.w .sprite_section",runtime)
+        background=runtime.split(".render_background:",1)[1].split(".sprite_section:",1)[0]
+        self.assertIn("tst.b gb_vram_dirty",background)
+        self.assertIn("beq.w .render_tilemap",background)
+        self.assertIn("tst.b gb_plane_initialized",background)
+        vram_write=runtime.split(".vram:",1)[1].split(".wram:",1)[0]
+        self.assertIn("cmpi.w #$1800,d1",vram_write)
+        self.assertIn(".vram_map_dirty:",vram_write)
+        self.assertIn("move.b #1,gb_bg_dirty",vram_write)
 
     def test_daa_has_a_native_lowering(self):
         import importlib.util

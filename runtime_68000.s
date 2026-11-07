@@ -32,6 +32,7 @@ gb_bg_dirty equ $FF0032
 gb_timer_reloaded equ $FF0033
 gb_defer_irq equ $FF0034
 gb_force_tick equ $FF0035
+gb_plane_initialized equ $FF0036
 gb_missing_count equ $FF0038
 gb_render_count equ $FF003C
 gb_full_render_count equ $FF0040
@@ -238,7 +239,12 @@ gb_write8:
 	beq.s .vram_unchanged
 	move.b d0,(a0,d1.w)
 	move.b #1,gb_video_dirty
+	cmpi.w #$1800,d1
+	bhs.s .vram_map_dirty
 	move.b #1,gb_vram_dirty
+	bra.s .vram_unchanged
+.vram_map_dirty:
+	move.b #1,gb_bg_dirty
 .vram_unchanged:
 	rts
 .wram:
@@ -864,6 +870,10 @@ gb_render_frame:
 	beq.w .sprite_section
 .render_background:
 	addq.l #1,gb_full_render_count
+	; Scroll, palette and LCDC changes require a map/VDP-state refresh, but the
+	; expensive 640-pattern conversion is only needed after actual VRAM writes.
+	tst.b gb_vram_dirty
+	beq.w .render_tilemap
 	move.l #$40000000,$C00004
 	lea gb_vram,a0
 	lea gb_2bpp_nibble_table,a1
@@ -910,13 +920,23 @@ gb_render_frame:
 	add.w d1,d1
 	move.w (a1,d1.w),$C00000
 	dbf d7,.sprite_tile_row
-	; Clear Plane A, then place the 20x18-tile DMG viewport at (10,5).
+
+.render_tilemap:
+	; Reset already clears VDP memory. On the first background render, replace
+	; Plane A's tile-zero cells with the permanently transparent tile 640 so
+	; later conversion of GB tile zero cannot leak outside the viewport.
+	; Subsequent refreshes rewrite the complete viewport rows and need no clear.
+	tst.b gb_plane_initialized
+	bne.s .plane_initialized
 	move.l #$40000003,$C00004
 	move.w #640,d0
 	move.w #2047,d7
 .clear_plane_a:
 	move.w d0,$C00000
 	dbf d7,.clear_plane_a
+	move.b #1,gb_plane_initialized
+.plane_initialized:
+	; Place the 20x18-tile DMG viewport at (10,5).
 	move.l #$42940003,$C00004       ; Plane A cell (10,5)
 	lea gb_vram+$1800,a2
 	btst #3,gb_io+$40

@@ -53,12 +53,12 @@ The current-runtime v4 rebuild is
 state `$04`, cleared the board, and left both missing-block diagnostics zero.
 Its HALT fast-forward counter stayed zero on this route.
 
-The current source orders native memory dispatch around writable high memory.
-On the identical forced-top-out route it advanced 104,070,140 simulated
-T-cycles versus 97,961,204 previously, a 6.24% throughput improvement. The
-route still restored state `$04`, cleared both sampled board cells, and left
-both missing-block diagnostics zero. Commercial-ROM artifacts are not
-published.
+The current source orders native memory dispatch around writable high memory
+and separates tile-map dirtiness from tile-pattern dirtiness. On the identical
+forced-top-out route it advanced 120,219,100 simulated T-cycles versus
+97,961,204 previously, a 22.72% throughput improvement. The route still
+restored state `$04`, cleared both sampled board cells, and left both
+missing-block diagnostics zero. Commercial-ROM artifacts are not published.
 
 Current-session regression reports:
 
@@ -84,6 +84,18 @@ missing block. Normal active gameplay remains only about 5-7 GB fps, so this
 is a verified path and modest performance milestone, not full compatibility.
 
 All 59 focused tests pass. Native Mooneye timer remains 13/13 PASS.
+
+### VRAM dirty-class renderer split (2026-11-07)
+
+Tile-map writes no longer trigger conversion of all 640 Genesis patterns, and
+Plane A is cleared to its transparent tile only once. On the identical SML
+movement interval, simulated throughput rose from 6.60 to 7.40 GB fps
+(+12.1%) with the same rendered endpoint and zero missing blocks. On the exact
+Tetris forced-top-out route, simulated cycles rose by 22.72% while the
+validated result remained unchanged.
+
+Focused tests remain 59/59 PASS and native Mooneye timer remains 13/13 PASS.
+This improves throughput but does not establish real-time execution.
 
 ### Earliest-event HALT scheduler and movement (2026-11-05)
 
