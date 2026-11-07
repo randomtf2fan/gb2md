@@ -65,27 +65,34 @@ gb_missing_block:
 ; d1.w = logical GB address, returns value in d0.b.
 gb_read8:
 	moveq #-1,d0
-	cmpi.w #$4000,d1
-	blo.w .rom0_read
-	cmpi.w #$8000,d1
-	blo.w .romx_read
-	cmpi.w #$A000,d1
-	blo.w .vram_read
+	; Translated game code reads writable high memory far more often than ROM:
+	; split there first so WRAM, I/O, HRAM and IE avoid every cartridge/VRAM
+	; comparison. ROM and VRAM still use the same handlers below.
 	cmpi.w #$C000,d1
-	blo.w .read_done
+	blo.w .read_low
+	cmpi.w #$FF00,d1
+	bhs.w .read_high_io
 	cmpi.w #$E000,d1
 	blo.w .wram_read
 	cmpi.w #$FE00,d1
 	blo.w .echo_read
 	cmpi.w #$FEA0,d1
 	blo.w .oam_read
-	cmpi.w #$FF00,d1
-	blo.w .read_done
+	bra.w .read_done
+.read_high_io:
 	cmpi.w #$FF80,d1
 	blo.w .io_read
 	cmpi.w #$FFFF,d1
 	blo.w .hram_read
 	move.b gb_ie,d0
+	bra.w .read_done
+.read_low:
+	cmpi.w #$4000,d1
+	blo.w .rom0_read
+	cmpi.w #$8000,d1
+	blo.w .romx_read
+	cmpi.w #$A000,d1
+	blo.w .vram_read
 .read_done:
 	rts
 .rom0_read:
@@ -163,25 +170,31 @@ gb_read8:
 ; d1.w = logical GB address, d0.b = value.
 gb_write8:
 	addq.l #1,gb_write_count
-	cmpi.w #$8000,d1
-	blo.w .mapper
-	cmpi.w #$A000,d1
-	blo.w .vram
+	; As above, prioritize the writable address space used by normal gameplay.
+	; Mapper and VRAM writes take the low path; their semantics are unchanged.
 	cmpi.w #$C000,d1
-	blo.w .done
+	blo.w .write_low
+	cmpi.w #$FF00,d1
+	bhs.w .write_high_io
 	cmpi.w #$E000,d1
 	blo.w .wram
 	cmpi.w #$FE00,d1
 	blo.w .echo
 	cmpi.w #$FEA0,d1
 	blo.w .oam
-	cmpi.w #$FF00,d1
-	blo.w .done
+	bra.w .done
+.write_high_io:
 	cmpi.w #$FF80,d1
 	blo.w .io
 	cmpi.w #$FFFF,d1
 	blo.w .hram
 	move.b d0,gb_ie
+	bra.w .done
+.write_low:
+	cmpi.w #$8000,d1
+	blo.w .mapper
+	cmpi.w #$A000,d1
+	blo.w .vram
 .done:
 	rts
 .mapper:

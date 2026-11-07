@@ -183,8 +183,8 @@ miscompiled. It does not copy the input ROM into output artifacts.
   incomplete.
 - Tetris v4 is the strongest gameplay regression. The current Super Mario Land
   candidate leaves the former timer-active stalls, renders World 1-1, advances
-  its timer, and responds to sustained Right movement; extended gameplay and
-  exact pacing are not verified.
+  its timer, and executes movement, jump, and collision/death paths; extended
+  gameplay and exact pacing are not verified.
 - Pokémon Red and the tested Bad Apple demo do not yet produce playable native
   results. See [COMPATIBILITY.md](COMPATIBILITY.md) for measured evidence.
 

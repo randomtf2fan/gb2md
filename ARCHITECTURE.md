@@ -204,6 +204,12 @@ semantics are incomplete in the native runtime.
 There is intentionally no direct mapping from Game Boy VRAM to `$C00000`.
 `$C00000` is the Genesis VDP data port, not byte-addressable video memory.
 
+The native `gb_read8` and `gb_write8` decision trees split the writable
+`$C000-$FFFF` half first, then split I/O/HRAM at `$FF00`. Generated code embeds
+ROM operands, while live game state repeatedly accesses WRAM and high memory,
+so this ordering removes comparisons from the common path. It is only a search
+ordering change: every region still reaches the same backing store and helper.
+
 ## Timing, interrupts, HALT, and polling loops
 
 `gb_tick` consumes `gb_step_cycles` plus batched straight-line cycles. It
@@ -296,7 +302,7 @@ differential testing remain unfinished.
 
 Working and verified at the time of writing:
 
-- All 58 focused unit/smoke tests pass.
+- All 59 focused unit/smoke tests pass.
 - Eleven individual Blargg CPU tests pass in the Python oracle.
 - Thirteen Mooneye timer tests and `bits/reg_f` pass in Python and verified
   native Genesis execution.
@@ -314,7 +320,8 @@ Incomplete or unresolved:
   mapper RAM/RTC/persistence, and native Blargg serial observation are missing.
 - Super Mario Land's HALT-loop slowdown is fixed and its last known `F2`
   instructions lower natively. World 1-1 now renders, advances its timer, and
-  responds to sustained Right movement. Longer gameplay and exact pacing still
+  responds to sustained Right movement; jump and collision/death paths have
+  also executed without missing blocks. Longer gameplay and exact pacing still
   need verification. Pokémon Red and the tested Bad Apple demo currently
   render black in their native builds.
 

@@ -1,6 +1,6 @@
 # GB2MD compatibility status
 
-Last measured: 2026-11-05. A PASS means the ROM's documented serial or
+Last measured: 2026-11-07. A PASS means the ROM's documented serial or
 register signature was observed. Booting or drawing an image is not a PASS.
 `Native NOT_RUN` means no Genesis-side success protocol was observed, even if
 the ROM assembled successfully.
@@ -53,6 +53,13 @@ The current-runtime v4 rebuild is
 state `$04`, cleared the board, and left both missing-block diagnostics zero.
 Its HALT fast-forward counter stayed zero on this route.
 
+The current source orders native memory dispatch around writable high memory.
+On the identical forced-top-out route it advanced 104,070,140 simulated
+T-cycles versus 97,961,204 previously, a 6.24% throughput improvement. The
+route still restored state `$04`, cleared both sampled board cells, and left
+both missing-block diagnostics zero. Commercial-ROM artifacts are not
+published.
+
 Current-session regression reports:
 
 - `compat-results/blargg-cpu-auto-input-session.json`: Python 11 PASS; native 11 NOT_RUN
@@ -65,6 +72,18 @@ Current-session regression reports:
   completing the current-runtime native timer result at 13/13
 
 ## Super Mario Land investigation
+
+### Jump, collision, and writable-memory dispatch (2026-11-07)
+
+The native runtime now prioritizes WRAM, I/O, HRAM, and IE in its memory
+dispatch tree. On identical SML routes this yields roughly 5% more simulated
+progress without changing the gameplay endpoint. A sampled jump moved Mario's
+OAM Y from 128 to 113 and visibly rendered him airborne. A separate no-jump
+route reached the collision/death-bounce animation and continued without a
+missing block. Normal active gameplay remains only about 5-7 GB fps, so this
+is a verified path and modest performance milestone, not full compatibility.
+
+All 59 focused tests pass. Native Mooneye timer remains 13/13 PASS.
 
 ### Earliest-event HALT scheduler and movement (2026-11-05)
 

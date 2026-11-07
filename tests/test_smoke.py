@@ -203,6 +203,15 @@ class SmokeTest(unittest.TestCase):
         self.assertIn(".plain_io_synced:",runtime)
         self.assertIn("gb_force_tick",runtime)
 
+    def test_native_memory_dispatch_prioritizes_writable_high_memory(self):
+        runtime=(ROOT/"runtime_68000.s").read_text()
+        read=runtime.split("gb_read8:",1)[1].split("gb_write8:",1)[0]
+        write=runtime.split("gb_write8:",1)[1].split("gb_idle_wait:",1)[0]
+        self.assertLess(read.index("cmpi.w #$C000,d1"),read.index("cmpi.w #$4000,d1"))
+        self.assertLess(read.index("cmpi.w #$FF00,d1"),read.index(".read_low:"))
+        self.assertLess(write.index("cmpi.w #$C000,d1"),write.index("cmpi.w #$8000,d1"))
+        self.assertLess(write.index("cmpi.w #$FF00,d1"),write.index(".write_low:"))
+
     def test_native_scf_and_ccf_preserve_z_and_update_carry(self):
         import importlib.util
         spec=importlib.util.spec_from_file_location("trace_flags",ROOT/"trace_recompiler.py")
