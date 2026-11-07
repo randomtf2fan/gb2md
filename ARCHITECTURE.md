@@ -75,8 +75,11 @@ discovery and compatibility testing.
 - `Memory.tick()` advances DIV/TIMA, approximate LY, and VBlank state.
 
 This is an executable reference for tracing and tests, not a frontend included
-in the generated ROM. It currently approximates parts of the hardware: OAM DMA
-is atomic, PPU modes and access restrictions are incomplete, and LY is a
+in the generated ROM. CPU bus activity is expressed as explicit four-T-cycle
+machine cycles. OAM DMA uses a request/start pipeline, transfers one byte per
+machine cycle, supports restart while the old transfer remains active, and
+blocks CPU OAM access during an active transfer. PPU modes and VRAM access
+restrictions remain incomplete, OAM corruption is not modeled, and LY is a
 scanline approximation.
 
 `gb_memory.py` contains a more explicit `MBC3` model, including RAM/RTC select
@@ -91,11 +94,14 @@ fixed `--steps N` budget is per scenario. `--auto-steps` continues the same
 scenario state in chunks while dynamic coverage grows, bounded by its maximum
 and plateau settings.
 
-`trace_step()` records the instruction at the current `(bank, PC)` before
-calling `CPU.step()`. Bank zero identifies the fixed `$0000-$3FFF` window;
-the selected mapper bank identifies execution in `$4000-$7FFF`. The instruction
-bytes, hit counts, dynamic HRAM values, register state, and stopping reason feed
-`trace-profile.json`.
+`trace_step()` calls `CPU.step()` and records the bytes actually returned by
+the instruction fetch bus together with the pre-step `(bank, PC)`. This matters
+when DMA contention makes executable OAM read as `$FF`, and avoids tracing a
+stale direct memory peek. HALT and interrupt-only cycles have no fetched
+instruction and do not invent a trace entry. Bank zero identifies the fixed
+`$0000-$3FFF` window; the selected mapper bank identifies execution in
+`$4000-$7FFF`. The fetched bytes, hit counts, dynamic HRAM values, register
+state, and stopping reason feed `trace-profile.json`.
 
 Dynamic tracing is essential for computed control flow and RAM/HRAM code, but
 it cannot establish whole-program reachability. Games may wait indefinitely
@@ -157,9 +163,14 @@ these discoveries into `hl_pointer_table_targets` and
 `rst_inline_table_targets`, while `indirect_table_targets` remains the unique
 aggregate.
 
-For dynamically copied HRAM code, static closure accepts an instruction only
-when every byte at that address had one stable observed value. Conflicting
-dynamic code raises an error rather than silently compiling the wrong bytes.
+For dynamically copied HRAM and executable OAM, the trace retains every
+observed byte sequence for a `(bank, PC)`. Generated bounded selectors compare
+the live backing bytes and dispatch only to variants observed during tracing;
+OAM selectors also choose the observed `$FF` instruction while DMA blocks the
+bus. An unseen value enters `gb_missing_block`. Conflicting executable variants
+outside these explicitly supported writable regions raise an error rather than
+silently compiling the wrong bytes. This is finite variant compilation, not an
+SM83 interpreter.
 
 ## Native SM83-to-68000 lowering
 
@@ -193,13 +204,16 @@ synchronization.
 | OAM shadow | `gb_oam` at `$FF0200` |
 | 8 KiB VRAM shadow | `gb_vram` at `$FF0300` |
 | 8 KiB WRAM/echo backing | `gb_wram` at `$FF2300` |
+| 32 KiB volatile cartridge RAM | `gb_eram` at `$FF4300` |
 | Cartridge ROM | `gb_cart_rom` in the Genesis ROM image |
 
 `gb_read8` and `gb_write8` route logical 16-bit Game Boy addresses to these
 regions. ROM-window reads use `gb_rom_bank`; writes below `$8000` update the
-implemented mapper state. MBC1/MBC3 low ROM-bank selection works, but complete
-RAM enable/banking, MBC1 modes, MBC3 RTC, persistence, and broader mapper
-semantics are incomplete in the native runtime.
+implemented mapper state. The native runtime implements low ROM-bank selection
+and volatile external-RAM enable/banking for its current MBC1/MBC3 paths, plus
+MBC5 low/high ROM-bank and RAM-bank controls. MBC1 size masks and multicart
+edge behavior, MBC3 RTC selection/latching, battery-backed save persistence,
+and broader mapper semantics remain incomplete.
 
 There is intentionally no direct mapping from Game Boy VRAM to `$C00000`.
 `$C00000` is the Genesis VDP data port, not byte-addressable video memory.
@@ -236,10 +250,18 @@ the next modeled wake event. `gb_tick` consumes every DIV and scanline boundary
 crossed by a large batch. The counter at `$FF0044` records uses of these paths.
 This is event batching, not an artificial clock multiplier.
 
-OAM DMA is currently copied atomically in both oracle and runtime. Real DMG DMA
-takes about 160 machine cycles and restricts CPU bus access. This known gap is
-the shared cause category for fourteen remaining Mooneye instruction-timing
-failures.
+OAM DMA is progressive in both oracle and runtime. A write to `$FF46` enters a
+two-stage request/start pipeline; the transfer then copies 160 bytes at one byte
+per machine cycle. A restart keeps the old transfer active until the replacement
+starts. CPU reads from OAM return `$FF` and writes are ignored while DMA is
+active. The native scheduler handles pipeline edges one machine cycle at a time
+but bulk-copies a stable contiguous run within a scheduler batch, preserving
+the modeled boundaries without paying one 68000 helper dispatch per byte.
+
+The model intentionally stops short of full hardware bus arbitration. It does
+not yet restrict all non-HRAM CPU accesses during DMG DMA, emulate OAM
+corruption, or model CGB DMA buses. Those remaining gaps should be tested
+separately from the now-passing targeted Mooneye DMA/start/restart/source cases.
 
 ## Graphics and controller input
 
@@ -307,10 +329,14 @@ differential testing remain unfinished.
 
 Working and verified at the time of writing:
 
-- All 59 focused unit/smoke tests pass.
+- All 65 focused unit/smoke tests pass.
 - Eleven individual Blargg CPU tests pass in the Python oracle.
 - Thirteen Mooneye timer tests and `bits/reg_f` pass in Python and verified
   native Genesis execution.
+- The expanded 28-ROM Mooneye CPU/control set passes in Python. The targeted
+  six-ROM OAM-DMA set passes in both Python and verified native execution.
+- GB2MD's original generated MBC3 diagnostic passes in Python and native
+  execution for two volatile RAM banks and RAM disable/re-enable behavior.
 - The automatic Tetris checkpoint boots, accepts real controller input, enters
   A-Type play, scores, clears lines, survived an extended manual session, and
   completes the reproduced forced-top-out/game-over route.
@@ -321,8 +347,9 @@ Incomplete or unresolved:
   current bottleneck. Pause, B-Type, audio, and exact top clipping remain
   unverified.
 - Trace/static closure cannot yet prove or discover all computed targets.
-- OAM DMA bus behavior, PPU timing/modes/STAT/window/clipping, audio, complete
-  mapper RAM/RTC/persistence, and native Blargg serial observation are missing.
+- Full DMA bus arbitration/corruption, PPU timing/modes/STAT/window/clipping,
+  audio, complete mapper RTC/save persistence, and native Blargg serial
+  observation are missing.
 - Super Mario Land's HALT-loop slowdown is fixed and its last known `F2`
   instructions lower natively. World 1-1 now renders, advances its timer, and
   responds to sustained Right movement; jump and collision/death paths have

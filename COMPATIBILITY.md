@@ -53,12 +53,13 @@ The current-runtime v4 rebuild is
 state `$04`, cleared the board, and left both missing-block diagnostics zero.
 Its HALT fast-forward counter stayed zero on this route.
 
-The current source orders native memory dispatch around writable high memory
-and separates tile-map dirtiness from tile-pattern dirtiness. On the identical
-forced-top-out route it advanced 120,219,100 simulated T-cycles versus
-97,961,204 previously, a 22.72% throughput improvement. The route still
-restored state `$04`, cleared both sampled board cells, and left both
-missing-block diagnostics zero. Commercial-ROM artifacts are not published.
+The current source adds progressive bulk OAM DMA and expanded mapper state. On
+the identical forced-top-out route it advances 111,441,356 simulated T-cycles,
+13.76% above the original 97,961,204-cycle runtime, while still restoring state
+`$04`, clearing both sampled board cells, and leaving both missing-block
+diagnostics zero. The older atomic-DMA renderer checkpoint reached 120,219,100
+cycles, so DMA correctness currently costs about 7.30% on this workload.
+Commercial-ROM artifacts are not published.
 
 Current-session regression reports:
 
@@ -83,7 +84,7 @@ route reached the collision/death-bounce animation and continued without a
 missing block. Normal active gameplay remains only about 5-7 GB fps, so this
 is a verified path and modest performance milestone, not full compatibility.
 
-All 59 focused tests pass. Native Mooneye timer remains 13/13 PASS.
+All 65 focused tests pass. Native Mooneye timer remains 13/13 PASS.
 
 ### VRAM dirty-class renderer split (2026-11-07)
 
@@ -91,10 +92,10 @@ Tile-map writes no longer trigger conversion of all 640 Genesis patterns, and
 Plane A is cleared to its transparent tile only once. On the identical SML
 movement interval, simulated throughput rose from 6.60 to 7.40 GB fps
 (+12.1%) with the same rendered endpoint and zero missing blocks. On the exact
-Tetris forced-top-out route, simulated cycles rose by 22.72% while the
-validated result remained unchanged.
+Tetris forced-top-out route, simulated cycles rose from 97,961,204 to
+120,219,100 (+22.72%) while the validated result remained unchanged.
 
-Focused tests remain 59/59 PASS and native Mooneye timer remains 13/13 PASS.
+Focused tests remain 65/65 PASS and native Mooneye timer remains 13/13 PASS.
 This improves throughput but does not establish real-time execution.
 
 ### Earliest-event HALT scheduler and movement (2026-11-05)
@@ -129,8 +130,8 @@ missing coverage.
 The runtime now batches this masked-timer case through the normal timer event
 logic and handles every DIV/scanline boundary crossed by a large batch. This
 paragraph records the preceding milestone; the earliest-event scheduler above
-supersedes its timer-IRQ-enabled fallback. A private candidate
-leaves state `$0F` and renders World 1-1 without a missing-block trap. The later
+supersedes its timer-IRQ-enabled fallback. A private candidate leaves state
+`$0F` and renders World 1-1 without a missing-block trap. The later
 initialization countdown is still slow and the timer remains at 400, so
 gameplay is not a PASS. Commercial-ROM build artifacts are not published.
 
@@ -230,27 +231,60 @@ Native reports are split by execution budget:
 ## Other Mooneye CPU/control tests
 
 `bits/reg_f.gb` passes in Python and natively on the current runtime; see
-`compat-results/mooneye-reg-f-native-final.json`. The expanded Python run is
-`compat-results/mooneye-cpu-control-expanded.json`.
+`compat-results/mooneye-reg-f-native-final.json`. The current expanded Python
+run is `compat-results/mooneye-cpu-control-dma-final.json`: all 28 selected
+CPU/control ROMs pass, including the fourteen instruction-timing cases that
+previously failed while executing from OAM during DMA.
 
-Python PASS: `reg_f`, `daa`, `di_timing-GS`, `div_timing`, `ei_sequence`,
-`ei_timing`, `halt_ime0_ei`, `halt_ime0_nointr_timing`, `halt_ime1_timing`,
-`halt_ime1_timing2-GS`, `if_ie_registers`, `intr_timing`, `rapid_di_ei`, and
-`reti_intr_timing`.
+The fix was general: CPU operations now expose their actual four-T-cycle bus
+reads, writes, and idle cycles; OAM DMA progresses one byte per machine cycle;
+and the tracer records the bytes actually fetched after bus effects rather than
+peeking before execution. This is a Python-oracle result for the complete
+28-ROM group. Do not infer 28 native passes: native execution has only been
+verified for the subsets explicitly listed below.
 
-Python FAIL: `add_sp_e_timing`, `call_cc_timing`, `call_cc_timing2`,
-`call_timing`, `call_timing2`, `jp_cc_timing`, `jp_timing`,
-`ld_hl_sp_e_timing`, `pop_timing`, `push_timing`, `ret_cc_timing`,
-`ret_timing`, `reti_timing`, and `rst_timing`. These ROMs start OAM DMA and
-observe instruction bus activity while it is active. GB2MD currently performs
-an atomic OAM copy and does not enforce the 160-machine-cycle DMA bus lock, so
-the failure category is `oam_dma_model`, not an opcode-specific patch target.
-Native execution for this group has not been claimed.
+## Mooneye OAM DMA acceptance
+
+The six targeted DMG/MGB-compatible OAM-DMA ROMs pass in the Python oracle and
+as recompiled Genesis ROMs observed through BlastEm:
+
+| ROM | Python | Native Genesis |
+|---|---:|---:|
+| oam_dma/basic | PASS | PASS |
+| oam_dma/reg_read | PASS | PASS |
+| oam_dma/sources-GS | PASS | PASS |
+| oam_dma_restart | PASS | PASS |
+| oam_dma_start | PASS | PASS |
+| oam_dma_timing | PASS | PASS |
+
+`basic` and `sources-GS` require a 1,800-frame native observation window; the
+other four pass in the 600-frame batch. Current reports include
+`compat-results/mooneye-oam-dma-bulk-basic-1800.json`,
+`compat-results/mooneye-oam-dma-bulk-sources-1800.json`, and
+`compat-results/mooneye-oam-dma-bulk-native-suite.json` (whose older 600-frame
+`basic` TIMEOUT is superseded by the explicit 1,800-frame PASS).
+
+These results validate progressive start/restart timing, OAM register reads,
+and tested DMA source mappings. They do not establish complete DMG bus
+arbitration, OAM corruption, or CGB DMA behavior.
+
+## Original MBC3 RAM diagnostic
+
+`make_homebrew_test_rom.py` generates an original post-boot MBC3 diagnostic
+with no Nintendo logo or third-party data. It writes distinct values to RAM
+banks 0 and 1, verifies both values, checks that disabled RAM reads as `$FF`,
+and verifies bank contents after re-enabling RAM. The generated fixture passes
+in the Python oracle and as a recompiled Genesis ROM observed through BlastEm.
+Report: `compat-results/original-mbc3-ram-native.json`.
+
+This verifies the tested volatile RAM enable/bank path. It does not verify
+battery save persistence, MBC3 RTC registers/latching, or every mapper edge
+case.
 
 ## Not yet run or not automatically verifiable
 
-- Mooneye PPU/OAM-DMA acceptance and emulator-only mapper suites beyond the
-  CPU subset above.
+- Mooneye PPU, OAM-corruption, and emulator-only mapper suites beyond the
+  explicitly listed subsets above.
 - DMG-acid2 and all screenshot-only tests; image comparison is not implemented.
 - CGB-only ROMs, which are reported as UNSUPPORTED rather than attempted as DMG.
 - Gambatte, GBMicrotest, SameSuite, AGE, Mealybug, RTC/MBC and audio suites.

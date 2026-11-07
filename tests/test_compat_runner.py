@@ -14,6 +14,14 @@ def load_runner():
     return module
 
 
+def load_homebrew_builder():
+    spec = importlib.util.spec_from_file_location(
+        "make_homebrew_test_rom", ROOT / "make_homebrew_test_rom.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def blank_rom(opcodes=b"\x00"):
     rom = bytearray(0x8000)
     rom[0x100:0x100 + len(opcodes)] = opcodes
@@ -76,6 +84,19 @@ class CompatibilityRunnerTests(unittest.TestCase):
         runner = load_runner()
         self.assertEqual(runner.protocol_for(Path("test_roms/blargg/halt_bug.gb")),"manual_visual")
         self.assertEqual(runner.protocol_for(Path("test_roms/blargg/cpu_instrs/individual/01-special.gb")),"blargg_serial")
+
+    def test_original_mbc3_homebrew_passes_reference_protocol(self):
+        runner = load_runner()
+        image = load_homebrew_builder().build_mbc3_ram_test()
+        self.assertEqual(image[0x104:0x134], bytes(0x30))  # No boot-logo asset.
+        self.assertEqual(image[0x147:0x14A], bytes((0x13, 0x01, 0x03)))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "mooneye-test-suite"
+            path = root / "acceptance" / "mbc3_ram.gb"
+            path.parent.mkdir(parents=True)
+            path.write_bytes(image)
+            result = runner.run_python(path, root, 10_000, None, 1024)
+        self.assertEqual(result["python"]["status"], "PASS")
 
 
 if __name__ == "__main__":

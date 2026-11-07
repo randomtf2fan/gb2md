@@ -261,8 +261,8 @@ def run_python(path: Path, root: Path, max_steps: int, max_frames: int | None,
 
     serial = bytes(memory.serial).decode("ascii", "replace")
     if status == "FAIL" and memory.dma_writes:
-        category = "oam_dma_model"
-        detail += f"; test started OAM DMA {memory.dma_writes} time(s), currently modelled atomically"
+        category = "oam_dma_timing"
+        detail += f"; test started progressive OAM DMA {memory.dma_writes} time(s)"
     result["python"] = {
         "status": status,
         "category": category,

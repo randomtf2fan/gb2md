@@ -81,7 +81,7 @@ def native_body(block):
     op,operand,pc,bank=block["opcode"],block["operand"],block["pc"],block["bank"]
     nextpc=(pc+len(bytes.fromhex(block["bytes"])))&0xFFFF; fam=block["family"]
     body=[]
-    stem=f"B{bank:03X}_{pc:04X}"
+    stem=f"B{bank:03X}_{pc:04X}{block.get('variant_suffix','')}"
     taken_cost=instruction_cycles(op,operand,True)
     def push_word(value_setup):
         return value_setup + ["move.w gb_sp,d1","subq.w #2,d1","move.w d1,gb_sp","move.l d1,d4","addq.w #1,d1",
@@ -323,7 +323,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
         raise ValueError("invalid auto-step safety limits")
     if auto_inputs and min(input_max_branches,input_max_depth,input_branch_steps,input_max_steps,input_hold_frames,input_snapshot_interval_frames,input_max_snapshots,input_bridge_states_per_depth)<=0:
         raise ValueError("invalid automatic-input safety limits")
-    rom=rom_path.read_bytes();hits=collections.Counter();first={};scenario_reports=[];dynamic_values=collections.defaultdict(set)
+    rom=rom_path.read_bytes();hits=collections.Counter();first={};observed=collections.defaultdict(collections.Counter);scenario_reports=[];dynamic_values=collections.defaultdict(set)
     input_candidates=[];candidate_keys=set();candidate_last_frame={}
     def capture_input_state(cpu,memory,origin,target,depth=0,limit=None,interval=None):
         if not auto_inputs or not reads_joypad(cpu,memory):return
@@ -334,12 +334,15 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
         candidate_keys.add(key)
         if limit is None or len(target)<limit:target.append((copy.deepcopy(cpu),depth,origin,frame,key))
     def trace_step(cpu,memory,scenario_keys):
-        pc=cpu.pc;bank=memory.rom_bank if 0x4000<=pc<0x8000 else 0;key=(bank,pc);hits[key]+=1
-        if key not in scenario_keys:
-            size=instruction_length(memory.read(pc));raw=bytes(memory.read(pc+i) for i in range(size))
-            if key in first and first[key]!=raw:raise RuntimeError(f"dynamic code conflict at bank {bank} PC ${pc:04X}: {first[key].hex()} vs {raw.hex()}")
-            first.setdefault(key,raw);scenario_keys.add(key)
         cpu.step()
+        # Record the bytes actually fetched by the CPU after its M-cycle bus
+        # transition. Peeking before step() is wrong for DMA-contended OAM and
+        # also invents instructions during HALT or interrupt dispatch.
+        if cpu.last_instruction is None:return
+        pc=cpu.last_pc;bank=cpu.last_bank;key=(bank,pc);raw=cpu.last_instruction;hits[key]+=1
+        observed[key][raw]+=1
+        if key not in scenario_keys:
+            first.setdefault(key,raw);scenario_keys.add(key)
     scenarios=[{"name":"no-input","events":[]}]+list(input_scenarios or [])
     for scenario_index,scenario in enumerate(scenarios):
         memory=Memory(rom);cpu=CPU(memory);scenario_keys=set();applied_memory_events=set()
@@ -537,6 +540,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
     for (bank,pc),count in sorted(hits.items()):
         raw=first[(bank,pc)]; operand=(raw[1] if len(raw)==2 else (raw[1]|raw[2]<<8 if len(raw)==3 else 0))
         block={"bank":bank,"pc":pc,"opcode":raw[0],"operand":operand,"bytes":raw.hex(),"family":family(raw[0]),"hits":count}
+        block["observed_variants"]=[value.hex() for value in observed[(bank,pc)] if value!=raw]
         block["native_lowered"]=native_body(block) is not None; blocks.append(block)
     # Recognize short, backward, read-only polling loops. These commonly wait
     # for a VBlank flag or LY value and would otherwise consume nearly all
@@ -610,13 +614,39 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
     lines += ["gb_compiled_entry:",f"\tbra.w {label(entry)}",""]
     for block in blocks:
         lines.append(f"{label(block)}:")
-        lines.append(f"\tmove.b #{instruction_cycles(block['opcode'],block['operand'],False)},gb_step_cycles")
-        direct=native_body(block)
-        if direct is not None: lines += [f"\t{x}" for x in thread_static_dispatch(block,direct)]+[""]
-        else:
-            lines += [f"\tmove.w #${block['bank']:04X},gb_bank",f"\tmove.w #${block['pc']:04X},gb_pc",
-                      f"\tmove.b #${block['opcode']:02X},gb_opcode",f"\tmove.w #${block['operand']:04X},gb_operand",
-                      f"\tjsr gbop_{block['family'].lower()}","\tjmp gb_dispatch",""]
+        variants=[block]
+        for raw_hex in block.get("observed_variants",[]):
+            raw=bytes.fromhex(raw_hex);operand=raw[1] if len(raw)==2 else (raw[1]|raw[2]<<8 if len(raw)==3 else 0)
+            variants.append({**block,"opcode":raw[0],"operand":operand,"bytes":raw_hex,"family":family(raw[0]),"observed_variants":[]})
+        if len(variants)>1:
+            pc=block["pc"];resolver=f"{block['bank']:03X}_{pc:04X}"
+            if 0xFE00<=pc<0xFEA0:
+                ff_index=next((index for index,item in enumerate(variants) if item["bytes"]=="ff"),None)
+                lines += ["\ttst.b gb_dma_active",f"\tbeq.s .dynamic_accessible_{resolver}"]
+                lines += [f"\tbra.w .dynamic_variant_{resolver}_{ff_index}" if ff_index is not None else f"\tbra.w .dynamic_missing_{resolver}",f".dynamic_accessible_{resolver}:","\tlea gb_oam,a0"]
+                base=pc-0xFE00
+            elif 0xFF80<=pc<0xFFFF:
+                lines += ["\tlea gb_hram,a0"]
+                base=pc-0xFF80
+            else:
+                raise RuntimeError(f"unsupported dynamic code variants at bank {block['bank']} PC ${pc:04X}: "+", ".join(item["bytes"] for item in variants))
+            for index,variant in enumerate(variants):
+                raw=bytes.fromhex(variant["bytes"]);next_label=f".dynamic_next_{resolver}_{index}"
+                for offset,value in enumerate(raw):
+                    lines += [f"\tcmpi.b #${value:02X},{base+offset}(a0)",f"\tbne.w {next_label}"]
+                lines += [f"\tbra.w .dynamic_variant_{resolver}_{index}",f"{next_label}:"]
+            lines += [f".dynamic_missing_{resolver}:",f"\tmove.w #${pc:04X},gb_pc","\tjmp gb_missing_block"]
+            variants=[{**variant,"variant_suffix":f"_V{index}"} for index,variant in enumerate(variants)]
+        for index,variant in enumerate(variants):
+            if len(variants)>1:
+                lines.append(f".dynamic_variant_{block['bank']:03X}_{block['pc']:04X}_{index}:")
+            lines.append(f"\tmove.b #{instruction_cycles(variant['opcode'],variant['operand'],False)},gb_step_cycles")
+            direct=native_body(variant)
+            if direct is not None: lines += [f"\t{x}" for x in thread_static_dispatch(variant,direct)]+[""]
+            else:
+                lines += [f"\tmove.w #${variant['bank']:04X},gb_bank",f"\tmove.w #${variant['pc']:04X},gb_pc",
+                          f"\tmove.b #${variant['opcode']:02X},gb_opcode",f"\tmove.w #${variant['operand']:04X},gb_operand",
+                          f"\tjsr gbop_{variant['family'].lower()}","\tjmp gb_dispatch",""]
     # Hot constant successors above jump through these shared chain stubs.
     # gb_tick may redirect execution for an IRQ, so validate PC/bank before
     # entering the successor. Returns, JP (HL), mapper changes, and IRQ entry

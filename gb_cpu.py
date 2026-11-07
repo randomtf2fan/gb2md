@@ -69,6 +69,17 @@ class Memory:
         self.div_counter = 0
         self.timer_reload_delay = 0
         self.timer_reloaded_this_cycle = False
+        # OAM DMA is an M-cycle state machine rather than an instantaneous
+        # copy.  FF46 writes pass through requested -> starting -> active,
+        # which preserves the two-cycle startup/restart behaviour measured by
+        # the Mooneye acceptance tests.  Active transfers copy one byte every
+        # four T-cycles and keep OAM inaccessible until the final byte lands.
+        self.dma_requested = None
+        self.dma_starting = None
+        self.dma_active = False
+        self.dma_source = 0xFF
+        self.dma_index = 0
+        self.dma_phase = 0
         # Active-low: bits 0-3 are Right/Left/Up/Down and bits 4-7 are
         # A/B/Select/Start.  Tests and trace discovery can inject input here.
         self.joypad_state = 0xFF
@@ -87,7 +98,8 @@ class Memory:
             return self.eram[offset] if self.ram_enabled and offset < len(self.eram) else 0xFF
         if 0xC000 <= a < 0xE000: return self.wram[a-0xC000]
         if 0xE000 <= a < 0xFE00: return self.wram[a-0xE000]
-        if 0xFE00 <= a < 0xFEA0: return self.oam[a-0xFE00]
+        if 0xFE00 <= a < 0xFEA0:
+            return 0xFF if self._dma_blocks_oam() else self.oam[a-0xFE00]
         if a == 0xFF00:
             select=self.io[0]&0x30; low=0x0F
             if not select&0x10: low &= self.joypad_state&0x0F
@@ -107,7 +119,8 @@ class Memory:
             if self.ram_enabled and offset < len(self.eram): self.eram[offset]=v
         elif 0xC000 <= a < 0xE000: self.wram[a-0xC000] = v
         elif 0xE000 <= a < 0xFE00: self.wram[a-0xE000] = v
-        elif 0xFE00 <= a < 0xFEA0: self.oam[a-0xFE00] = v
+        elif 0xFE00 <= a < 0xFEA0:
+            if not self._dma_blocks_oam():self.oam[a-0xFE00] = v
         elif 0xFF00 <= a < 0xFF80:
             if a == 0xFF00:self.io[0]=0xC0|(v&0x30)|0x0F
             elif a == 0xFF04:
@@ -135,9 +148,8 @@ class Memory:
                         self.timer_reload_delay=0;self.io[0x05]=self.io[0x06];self.io[0x0F]|=4;self.timer_reloaded_this_cycle=True
             elif a == 0xFF0F:self.io[0x0F]=v&0x1F
             else:self.io[a-0xFF00] = v
-            if a == 0xFF46: # OAM DMA: one byte per source address, modelled atomically for reference execution
-                base=v<<8
-                for i in range(0xA0): self.oam[i]=self.read(base+i)
+            if a == 0xFF46:
+                self.dma_requested = v
         elif 0xFF80 <= a < 0xFFFF: self.hram[a-0xFF80] = v
         elif a == 0xFFFF: self.ie = v
     def mapper_write(self,a,v):
@@ -167,6 +179,41 @@ class Memory:
         if self.timer_reload_delay:return
         if self.io[0x05]==0xFF:self.io[0x05]=0;self.timer_reload_delay=4
         else:self.io[0x05]=(self.io[0x05]+1)&0xFF
+    def _dma_read(self, a):
+        """Read a DMA source byte without applying CPU-side OAM blocking."""
+        a &= 0xFFFF
+        if a < 0x4000:return self.rom[a] if a < len(self.rom) else 0xFF
+        if a < 0x8000:
+            offset=self.rom_bank*0x4000+(a-0x4000)
+            return self.rom[offset] if offset < len(self.rom) else 0xFF
+        if a < 0xA000:return self.vram[a-0x8000]
+        if a < 0xC000:
+            offset=self.ram_bank*0x2000+a-0xA000
+            return self.eram[offset] if self.ram_enabled and offset < len(self.eram) else 0xFF
+        # DMA source pages E0-FF mirror the corresponding C0-DF WRAM pages;
+        # unlike CPU reads, FE/FF do not select OAM or I/O during the transfer.
+        return self.wram[(a-0xC000)&0x1FFF]
+    def _dma_blocks_oam(self):
+        # CPU bus helpers advance the current M-cycle before sampling memory,
+        # so the startup transition has already promoted ``starting`` to an
+        # active transfer when OAM must become inaccessible.
+        return self.dma_active
+    def _dma_machine_cycle(self):
+        # An existing transfer continues during both restart pipeline cycles.
+        if self.dma_active:
+            self.oam[self.dma_index] = self._dma_read((self.dma_source<<8)|self.dma_index)
+            self.dma_index += 1
+            if self.dma_index >= 0xA0:self.dma_active=False
+        if self.dma_starting is not None:
+            self.dma_source=self.dma_starting;self.dma_starting=None
+            self.dma_index=0;self.dma_active=True
+        if self.dma_requested is not None:
+            self.dma_starting=self.dma_requested;self.dma_requested=None
+    def _tick_dma(self, n):
+        self.dma_phase += n
+        while self.dma_phase >= 4:
+            self.dma_phase -= 4
+            self._dma_machine_cycle()
     def tick(self, n=4):
         old=self.io[0x44]
         self.timer_reloaded_this_cycle=False
@@ -183,6 +230,7 @@ class Memory:
                         self.io[0x05]=self.io[0x06];self.io[0x0F]|=4;self.timer_reloaded_this_cycle=True
                 old_signal=self._timer_signal();self.div_counter=(self.div_counter+1)&0xFFFF;self.io[0x04]=self.div_counter>>8
                 if old_signal and not self._timer_signal():self._timer_increment()
+        self._tick_dma(n)
         self.cycles += n
         self.io[0x44] = (self.cycles // 456) % 154 # LY approximation for boot-path waits
         if old != 144 and self.io[0x44] == 144: self.io[0x0F] |= 1
@@ -194,6 +242,7 @@ class CPU:
         self.a,self.f,self.b,self.c,self.d,self.e,self.h,self.l = 1,0xB0,0,0x13,0,0xD8,1,0x4D
         self.sp,self.pc,self.ime,self.halted,self.ei_delay = 0xFFFE,0x100,False,False,0
         self.halt_bug=False
+        self.last_instruction=None;self.last_pc=None;self.last_bank=0;self._instruction_bytes=None
         self.opcode_count=Counter()
     def hl(self): return (self.h << 8) | self.l
     def set_hl(self,v): self.h=(v>>8)&255; self.l=v&255
@@ -201,8 +250,16 @@ class CPU:
     def de(self): return (self.d << 8) | self.e
     def set_bc(self,v): self.b=(v>>8)&255; self.c=v&255
     def set_de(self,v): self.d=(v>>8)&255; self.e=v&255
+    def idle_cycle(self): self.m.tick(4)
+    def read_cycle(self,a):
+        self.m.tick(4)
+        return self.m.read(a)
+    def write_cycle(self,a,v):
+        self.m.tick(4)
+        self.m.write(a,v,bus_phase=4)
     def fetch8(self):
-        v=self.m.read(self.pc)
+        v=self.read_cycle(self.pc)
+        if self._instruction_bytes is not None:self._instruction_bytes.append(v)
         if self.halt_bug:self.halt_bug=False
         else:self.pc=(self.pc+1)&0xFFFF
         return v
@@ -212,10 +269,10 @@ class CPU:
         for bit,val in ((Z,z),(N,n),(H,h),(C,c)):
             if val is not None: self.f = (self.f | bit) if val else (self.f & ~bit)
         self.f &= 0xF0
-    def r(self, n): return self.m.read(self.hl()) if n == 6 else (self.b,self.c,self.d,self.e,self.h,self.l,0,self.a)[n]
+    def r(self, n): return self.read_cycle(self.hl()) if n == 6 else (self.b,self.c,self.d,self.e,self.h,self.l,0,self.a)[n]
     def set_r(self,n,v):
         v &= 255
-        if n==6: self.m.write(self.hl(),v)
+        if n==6: self.write_cycle(self.hl(),v)
         elif n==0:self.b=v
         elif n==1:self.c=v
         elif n==2:self.d=v
@@ -223,10 +280,10 @@ class CPU:
         elif n==4:self.h=v
         elif n==5:self.l=v
         else:self.a=v
-    def push(self,v): self.sp=(self.sp-1)&0xFFFF; self.m.write(self.sp,v>>8); self.sp=(self.sp-1)&0xFFFF; self.m.write(self.sp,v)
+    def push(self,v): self.sp=(self.sp-1)&0xFFFF; self.write_cycle(self.sp,v>>8); self.sp=(self.sp-1)&0xFFFF; self.write_cycle(self.sp,v)
     def pop(self):
-        lo=self.m.read(self.sp); self.sp=(self.sp+1)&0xFFFF
-        hi=self.m.read(self.sp); self.sp=(self.sp+1)&0xFFFF
+        lo=self.read_cycle(self.sp); self.sp=(self.sp+1)&0xFFFF
+        hi=self.read_cycle(self.sp); self.sp=(self.sp+1)&0xFFFF
         return lo | (hi<<8)
     def add_a(self,v,carry=0):
         x=self.a+v+carry; self.flags(x&255==0,False,((self.a&15)+(v&15)+carry)>15,x>255); self.a=x&255
@@ -250,22 +307,13 @@ class CPU:
         else: out=v>>1; c=v&1
         self.set_r(n,out); self.flags(out==0,False,False,bool(c))
     def step(self):
-        """Execute one instruction/interrupt with hardware T-cycle timing."""
-        before_cycles=self.m.cycles; before_pc=self.pc; before_sp=self.sp
-        was_halted=self.halted
-        op=self.m.read(before_pc)
-        operand=self.m.read((before_pc+1)&0xFFFF) if op==0xCB else 0
+        """Execute one instruction/interrupt as explicit four-T-cycle buses."""
+        self.last_pc=self.pc
+        self.last_bank=self.m.rom_bank if 0x4000<=self.pc<0x8000 else 0
+        self.last_instruction=None;self._instruction_bytes=[]
         self._step_base()
-        elapsed=self.m.cycles-before_cycles
-        # Interrupt entry is already charged at 20 cycles by the base core;
-        # an idle HALT iteration is exactly four cycles.
-        if elapsed != 4 or was_halted:return
-        taken=False
-        if op in (0x20,0x28,0x30,0x38):taken=self.pc != ((before_pc+2)&0xFFFF)
-        elif op in (0xC2,0xCA,0xD2,0xDA):taken=self.pc != ((before_pc+3)&0xFFFF)
-        elif op in (0xC4,0xCC,0xD4,0xDC,0xC0,0xC8,0xD0,0xD8):taken=self.sp != before_sp
-        extra=instruction_cycles(op,operand,taken)-4
-        if extra:self.m.tick(extra)
+        if self._instruction_bytes:self.last_instruction=bytes(self._instruction_bytes)
+        self._instruction_bytes=None
     def _step_base(self):
         if self.ei_delay:
             self.ei_delay -= 1
@@ -275,21 +323,11 @@ class CPU:
             self.halted=False
             if self.ime:
                 bit=(pending & -pending).bit_length()-1
-                self.ime=False; self.m.io[0x0F] &= ~(1<<bit); self.push(self.pc); self.pc=0x40+bit*8; self.m.tick(20)
+                self.ime=False; self.m.io[0x0F] &= ~(1<<bit)
+                self.idle_cycle();self.idle_cycle();self.idle_cycle();self.push(self.pc);self.pc=0x40+bit*8
                 return
-        if self.halted: self.m.tick(); return
-        op=self.fetch8(); self.opcode_count[op]+=1; self.m.tick()
-        # The compact oracle executes an instruction's semantic operation at
-        # its final machine-cycle boundary. Charge the cycles after opcode
-        # fetch first so timer/DIV and I/O reads or writes are not observed
-        # several cycles too early. Conditional timing is known from the
-        # pre-instruction flags.
-        operand=self.m.read(self.pc) if op==0xCB else 0
-        taken=False
-        if op in (0x20,0x28,0x30,0x38,0xC2,0xCA,0xD2,0xDA,0xC4,0xCC,0xD4,0xDC,0xC0,0xC8,0xD0,0xD8):
-            taken=self.cond((op>>3)&3)
-        extra=instruction_cycles(op,operand,taken)-4
-        if extra:self.m.tick(extra)
+        if self.halted: self.idle_cycle(); return
+        op=self.fetch8(); self.opcode_count[op]+=1
         if op==0xCB: self.cb(); return
         if 0x40 <= op < 0x80:
             if op==0x76:
@@ -318,29 +356,29 @@ class CPU:
             else:self.sp=v
             return
         if op in (0x02,0x12,0x22,0x32):
-            a=(self.bc(),self.de(),self.hl(),self.hl())[(op>>4)&3]; self.m.write(a,self.a)
+            a=(self.bc(),self.de(),self.hl(),self.hl())[(op>>4)&3]; self.write_cycle(a,self.a)
             if op==0x22:self.set_hl(a+1)
             if op==0x32:self.set_hl(a-1)
             return
         if op in (0x0A,0x1A,0x2A,0x3A):
-            a=(self.bc(),self.de(),self.hl(),self.hl())[(op>>4)&3]; self.a=self.m.read(a)
+            a=(self.bc(),self.de(),self.hl(),self.hl())[(op>>4)&3]; self.a=self.read_cycle(a)
             if op==0x2A:self.set_hl(a+1)
             if op==0x3A:self.set_hl(a-1)
             return
         if op in (0x03,0x13,0x23,0x33,0x0B,0x1B,0x2B,0x3B):
             delta=1 if op&8==0 else -1; group=(op>>4)&3; vals=[self.bc(),self.de(),self.hl(),self.sp]; vals[group]=(vals[group]+delta)&0xFFFF
-            (self.set_bc(vals[0]),self.set_de(vals[1]),self.set_hl(vals[2]),setattr(self,'sp',vals[3])); return
+            (self.set_bc(vals[0]),self.set_de(vals[1]),self.set_hl(vals[2]),setattr(self,'sp',vals[3])); self.idle_cycle(); return
         if op in (0x09,0x19,0x29,0x39):
-            v=(self.bc(),self.de(),self.hl(),self.sp)[(op>>4)&3]; x=self.hl()+v; self.flags(n=False,h=((self.hl()&0xFFF)+(v&0xFFF))>0xFFF,c=x>0xFFFF); self.set_hl(x); return
+            v=(self.bc(),self.de(),self.hl(),self.sp)[(op>>4)&3]; x=self.hl()+v; self.flags(n=False,h=((self.hl()&0xFFF)+(v&0xFFF))>0xFFF,c=x>0xFFFF); self.set_hl(x); self.idle_cycle(); return
         if op in (0x04,0x0C,0x14,0x1C,0x24,0x2C,0x34,0x3C):
             n=(op>>3)&7; v=self.r(n); out=(v+1)&255; self.set_r(n,out); self.flags(out==0,n=False,h=(v&15)==15); return
         if op in (0x05,0x0D,0x15,0x1D,0x25,0x2D,0x35,0x3D):
             n=(op>>3)&7; v=self.r(n); out=(v-1)&255; self.set_r(n,out); self.flags(out==0,n=True,h=(v&15)==0); return
         if op in (0x06,0x0E,0x16,0x1E,0x26,0x2E,0x36,0x3E): self.set_r((op>>3)&7,self.fetch8()); return
-        if op==0x08: a=self.fetch16(); self.m.write(a,self.sp); self.m.write(a+1,self.sp>>8); return
+        if op==0x08: a=self.fetch16(); self.write_cycle(a,self.sp); self.write_cycle(a+1,self.sp>>8); return
         if op in (0x18,0x20,0x28,0x30,0x38):
             d=self.fetch8(); d-=256 if d&128 else 0
-            if op==0x18 or self.cond((op>>3)&3): self.pc=(self.pc+d)&0xFFFF
+            if op==0x18 or self.cond((op>>3)&3): self.pc=(self.pc+d)&0xFFFF;self.idle_cycle()
             return
         if op in (0x07,0x0F,0x17,0x1F):
             c=1 if self.flag(C) else 0
@@ -365,14 +403,16 @@ class CPU:
         if op==0x3F:self.flags(n=False,h=False,c=not self.flag(C)); return
         if op in (0xC3,0xC2,0xCA,0xD2,0xDA):
             a=self.fetch16();
-            if op==0xC3 or self.cond((op>>3)&3):self.pc=a
+            if op==0xC3 or self.cond((op>>3)&3):self.pc=a;self.idle_cycle()
             return
         if op in (0xCD,0xC4,0xCC,0xD4,0xDC):
             a=self.fetch16()
-            if op==0xCD or self.cond((op>>3)&3):self.push(self.pc);self.pc=a
+            if op==0xCD or self.cond((op>>3)&3):self.idle_cycle();self.push(self.pc);self.pc=a
             return
         if op in (0xC9,0xC0,0xC8,0xD0,0xD8,0xD9):
-            if op in (0xC9,0xD9) or self.cond((op>>3)&3): self.pc=self.pop()
+            conditional=op not in (0xC9,0xD9)
+            if conditional:self.idle_cycle()
+            if not conditional or self.cond((op>>3)&3): self.pc=self.pop();self.idle_cycle()
             if op==0xD9:self.ime=True
             return
         if op in (0xC1,0xD1,0xE1,0xF1):
@@ -382,7 +422,7 @@ class CPU:
             elif group==2:self.set_hl(v)
             else:self.a=v>>8;self.f=v&0xF0
             return
-        if op in (0xC5,0xD5,0xE5,0xF5): self.push((self.bc(),self.de(),self.hl(),(self.a<<8)|self.f)[(op>>4)&3]); return
+        if op in (0xC5,0xD5,0xE5,0xF5): self.idle_cycle();self.push((self.bc(),self.de(),self.hl(),(self.a<<8)|self.f)[(op>>4)&3]); return
         if op in (0xC6,0xCE,0xD6,0xDE,0xE6,0xEE,0xF6,0xFE):
             v=self.fetch8(); group=(op>>3)&7
             if group==0:self.add_a(v)
@@ -394,20 +434,20 @@ class CPU:
             elif group==6:self.a|=v;self.flags(self.a==0,False,False,False)
             else:self.sub_a(v,store=False)
             return
-        if op in (0xC7,0xCF,0xD7,0xDF,0xE7,0xEF,0xF7,0xFF):self.push(self.pc);self.pc=op&0x38;return
+        if op in (0xC7,0xCF,0xD7,0xDF,0xE7,0xEF,0xF7,0xFF):self.idle_cycle();self.push(self.pc);self.pc=op&0x38;return
         if op==0xE0:
-            self.m.write(0xFF00+self.fetch8(),self.a,bus_phase=4)
+            self.write_cycle(0xFF00+self.fetch8(),self.a)
             return
-        if op==0xF0:self.a=self.m.read(0xFF00+self.fetch8());return
-        if op==0xE2:self.m.write(0xFF00+self.c,self.a,bus_phase=4);return
-        if op==0xF2:self.a=self.m.read(0xFF00+self.c);return
-        if op==0xEA:self.m.write(self.fetch16(),self.a,bus_phase=4);return
-        if op==0xFA:self.a=self.m.read(self.fetch16());return
+        if op==0xF0:self.a=self.read_cycle(0xFF00+self.fetch8());return
+        if op==0xE2:self.write_cycle(0xFF00+self.c,self.a);return
+        if op==0xF2:self.a=self.read_cycle(0xFF00+self.c);return
+        if op==0xEA:self.write_cycle(self.fetch16(),self.a);return
+        if op==0xFA:self.a=self.read_cycle(self.fetch16());return
         if op==0xE8:
-            v=self.fetch8(); s=v-256 if v&128 else v; x=self.sp+s; self.flags(False,False,((self.sp&15)+(v&15))>15,((self.sp&255)+(v&255))>255);self.sp=x&0xFFFF;return
+            v=self.fetch8(); s=v-256 if v&128 else v; x=self.sp+s; self.flags(False,False,((self.sp&15)+(v&15))>15,((self.sp&255)+(v&255))>255);self.sp=x&0xFFFF;self.idle_cycle();self.idle_cycle();return
         if op==0xF8:
-            v=self.fetch8(); s=v-256 if v&128 else v; x=self.sp+s; self.flags(False,False,((self.sp&15)+(v&15))>15,((self.sp&255)+(v&255))>255);self.set_hl(x);return
-        if op==0xF9:self.sp=self.hl();return
+            v=self.fetch8(); s=v-256 if v&128 else v; x=self.sp+s; self.flags(False,False,((self.sp&15)+(v&15))>15,((self.sp&255)+(v&255))>255);self.set_hl(x);self.idle_cycle();return
+        if op==0xF9:self.sp=self.hl();self.idle_cycle();return
         if op==0xE9:self.pc=self.hl();return
         if op==0xF3:self.ime=False;self.ei_delay=0;return
         if op==0xFB:

@@ -37,11 +37,23 @@ gb_missing_count equ $FF0038
 gb_render_count equ $FF003C
 gb_full_render_count equ $FF0040
 gb_halt_fast_forward_count equ $FF0044
+gb_dma_source equ $FF0048
+gb_dma_index equ $FF004A
+gb_dma_active equ $FF004C
+gb_dma_request_source equ $FF004D
+gb_dma_requested equ $FF004E
+gb_dma_start_source equ $FF004F
+gb_dma_starting equ $FF0050
+gb_ram_bank equ $FF0051
+gb_ram_enabled equ $FF0052
+gb_mbc1_mode equ $FF0053
+gb_mbc1_upper equ $FF0054
 gb_io equ $FF0100
 gb_hram equ $FF0180
 gb_oam equ $FF0200
 gb_vram equ $FF0300
 gb_wram equ $FF2300
+gb_eram equ $FF4300
 
 	xdef gb_dispatch,gb_read8,gb_write8,gb_render_frame
 gb_dispatch:
@@ -94,10 +106,25 @@ gb_read8:
 	blo.w .romx_read
 	cmpi.w #$A000,d1
 	blo.w .vram_read
+	bra.w .eram_read
 .read_done:
 	rts
 .rom0_read:
 	lea gb_cart_rom,a0
+	; In MBC1 RAM-banking mode, the upper register remaps the fixed window.
+	cmpi.b #$01,gb_mapper_kind
+	blo.s .rom0_read_data
+	cmpi.b #$03,gb_mapper_kind
+	bhi.s .rom0_read_data
+	tst.b gb_mbc1_mode
+	beq.s .rom0_read_data
+	moveq #0,d2
+	move.b gb_mbc1_upper,d2
+	lsl.l #8,d2
+	lsl.l #8,d2
+	lsl.l #3,d2
+	adda.l d2,a0
+.rom0_read_data:
 	move.b (a0,d1.w),d0
 	rts
 .romx_read:
@@ -115,6 +142,21 @@ gb_read8:
 	lea gb_vram,a0
 	move.b (a0,d1.w),d0
 	rts
+.eram_read:
+	tst.b gb_ram_enabled
+	beq.s .eram_read_done
+	cmpi.b #4,gb_ram_bank
+	bhs.s .eram_read_done
+	subi.w #$A000,d1
+	moveq #0,d2
+	move.b gb_ram_bank,d2
+	lsl.l #8,d2
+	lsl.l #5,d2
+	lea gb_eram,a0
+	adda.l d2,a0
+	move.b (a0,d1.w),d0
+.eram_read_done:
+	rts
 .wram_read:
 	subi.w #$C000,d1
 	lea gb_wram,a0
@@ -126,6 +168,20 @@ gb_read8:
 	move.b (a0,d1.w),d0
 	rts
 .oam_read:
+	; OAM accessibility changes at individual DMA M-cycles. Commit all batched
+	; cycles through this read before sampling the active-transfer gate.
+	movem.l d1-d2/a0,-(sp)
+	move.b #1,gb_defer_irq
+	bsr.w gb_tick
+	clr.b gb_defer_irq
+	move.b #1,gb_force_tick
+	clr.b gb_step_cycles
+	movem.l (sp)+,d1-d2/a0
+	tst.b gb_dma_active
+	beq.s .oam_read_available
+	moveq #-1,d0
+	rts
+.oam_read_available:
 	subi.w #$FE00,d1
 	lea gb_oam,a0
 	move.b (a0,d1.w),d0
@@ -196,41 +252,131 @@ gb_write8:
 	blo.w .mapper
 	cmpi.w #$A000,d1
 	blo.w .vram
+	bra.w .eram
 .done:
 	rts
 .mapper:
 	; MBC1/MBC3 low ROM-bank register. Other mapper controls are expanded in
 	; the same service without changing generated blocks.
+	cmpi.b #$19,gb_mapper_kind
+	blo.s .mapper_not_mbc5
+	cmpi.b #$1E,gb_mapper_kind
+	bls.w .mapper_mbc5
+.mapper_not_mbc5:
+	cmpi.w #$2000,d1
+	bhs.s .mapper_bank_select
 	cmpi.b #$01,gb_mapper_kind
-	beq.s .mapper_low5
-	cmpi.b #$02,gb_mapper_kind
-	beq.s .mapper_low5
+	blo.w .done
 	cmpi.b #$03,gb_mapper_kind
-	beq.s .mapper_low5
+	bls.s .mapper_ram_enable
 	cmpi.b #$0F,gb_mapper_kind
-	blo.s .done
+	blo.w .done
 	cmpi.b #$13,gb_mapper_kind
-	bls.s .mapper_low7
-	bra.s .done
-.mapper_low5:
+	bhi.w .done
+.mapper_ram_enable:
+	andi.b #$0F,d0
+	cmpi.b #$0A,d0
+	seq gb_ram_enabled
+	andi.b #1,gb_ram_enabled
+	rts
+.mapper_bank_select:
+	cmpi.b #$01,gb_mapper_kind
+	beq.w .mapper_mbc1
+	cmpi.b #$02,gb_mapper_kind
+	beq.w .mapper_mbc1
+	cmpi.b #$03,gb_mapper_kind
+	beq.w .mapper_mbc1
+	cmpi.b #$0F,gb_mapper_kind
+	blo.w .done
+	cmpi.b #$13,gb_mapper_kind
+	bls.w .mapper_mbc3
+	bra.w .done
+.mapper_mbc1:
 	cmpi.w #$2000,d1
-	blo.s .done
+	blo.w .done
 	cmpi.w #$4000,d1
-	bhs.s .done
+	bhs.s .mbc1_upper_select
 	andi.w #$001F,d0
-	bne.s .store_mapper_bank
+	bne.s .mbc1_low_ready
 	moveq #1,d0
-	bra.s .store_mapper_bank
-.mapper_low7:
+.mbc1_low_ready:
+	move.w gb_rom_bank,d2
+	andi.w #$0060,d2
+	or.w d2,d0
+	move.w d0,gb_rom_bank
+	rts
+.mbc1_upper_select:
+	cmpi.w #$6000,d1
+	bhs.s .mbc1_mode_select
+	andi.b #3,d0
+	move.b d0,gb_mbc1_upper
+	moveq #0,d2
+	move.b d0,d2
+	lsl.w #5,d2
+	andi.w #$001F,gb_rom_bank
+	or.w d2,gb_rom_bank
+	tst.b gb_mbc1_mode
+	beq.s .mbc1_upper_rom_mode
+	move.b d0,gb_ram_bank
+	rts
+.mbc1_upper_rom_mode:
+	clr.b gb_ram_bank
+	rts
+.mbc1_mode_select:
+	andi.b #1,d0
+	move.b d0,gb_mbc1_mode
+	beq.s .mbc1_mode_rom
+	move.b gb_mbc1_upper,gb_ram_bank
+	rts
+.mbc1_mode_rom:
+	clr.b gb_ram_bank
+	rts
+.mapper_mbc3:
 	cmpi.w #$2000,d1
-	blo.s .done
+	blo.w .done
 	cmpi.w #$4000,d1
-	bhs.s .done
+	bhs.s .mbc3_ram_rtc_select
 	andi.w #$007F,d0
 	bne.s .store_mapper_bank
 	moveq #1,d0
 .store_mapper_bank:
 	move.w d0,gb_rom_bank
+	rts
+.mbc3_ram_rtc_select:
+	cmpi.w #$6000,d1
+	bhs.w .done
+	; Values 0-3 select RAM. RTC values 8-C are retained as inaccessible
+	; selectors until the RTC register layer is implemented.
+	move.b d0,gb_ram_bank
+	rts
+.mapper_mbc5:
+	cmpi.w #$2000,d1
+	bhs.s .mbc5_rom_low
+	andi.b #$0F,d0
+	cmpi.b #$0A,d0
+	seq gb_ram_enabled
+	andi.b #1,gb_ram_enabled
+	rts
+.mbc5_rom_low:
+	cmpi.w #$3000,d1
+	bhs.s .mbc5_rom_high
+	andi.w #$00FF,d0
+	andi.w #$0100,gb_rom_bank
+	or.w d0,gb_rom_bank
+	rts
+.mbc5_rom_high:
+	cmpi.w #$4000,d1
+	bhs.s .mbc5_ram_bank
+	andi.w #1,d0
+	lsl.w #8,d0
+	andi.w #$00FF,gb_rom_bank
+	or.w d0,gb_rom_bank
+	rts
+.mbc5_ram_bank:
+	cmpi.w #$6000,d1
+	bhs.w .done
+	andi.b #3,d0
+	move.b d0,gb_ram_bank
 	rts
 .vram:
 	subi.w #$8000,d1
@@ -247,6 +393,21 @@ gb_write8:
 	move.b #1,gb_bg_dirty
 .vram_unchanged:
 	rts
+.eram:
+	tst.b gb_ram_enabled
+	beq.s .eram_done
+	cmpi.b #4,gb_ram_bank
+	bhs.s .eram_done
+	subi.w #$A000,d1
+	moveq #0,d2
+	move.b gb_ram_bank,d2
+	lsl.l #8,d2
+	lsl.l #5,d2
+	lea gb_eram,a0
+	adda.l d2,a0
+	move.b d0,(a0,d1.w)
+.eram_done:
+	rts
 .wram:
 	subi.w #$C000,d1
 	lea gb_wram,a0
@@ -258,6 +419,17 @@ gb_write8:
 	move.b d0,(a0,d1.w)
 	rts
 .oam:
+	; As with reads, an OAM write is ordered at its actual instruction boundary
+	; so a DMA that starts during the instruction can suppress the store.
+	movem.l d0-d2/a0,-(sp)
+	move.b #1,gb_defer_irq
+	bsr.w gb_tick
+	clr.b gb_defer_irq
+	move.b #1,gb_force_tick
+	clr.b gb_step_cycles
+	movem.l (sp)+,d0-d2/a0
+	tst.b gb_dma_active
+	bne.s .oam_unchanged
 	subi.w #$FE00,d1
 	lea gb_oam,a0
 	cmp.b (a0,d1.w),d0
@@ -269,10 +441,13 @@ gb_write8:
 	rts
 .io:
 	subi.w #$FF00,d1
+	cmpi.w #$0046,d1
+	beq.s .io_flush_timing
 	cmpi.w #$0004,d1
 	blo.s .io_timing_synced
 	cmpi.w #$0007,d1
 	bhi.s .io_timing_synced
+.io_flush_timing:
 	; Preserve the write value/address while committing all cycles that
 	; precede this timing-sensitive access. Clearing gb_step_cycles prevents
 	; the chain stub from charging this instruction a second time.
@@ -361,58 +536,10 @@ gb_write8:
 .not_if_write:
 	cmpi.w #$0046,d1
 	bne.w .not_oam_dma
-	; DMG OAM DMA copies $A0 bytes from XX00. WRAM/echo are the hot paths
-	; used by Tetris and most games; other legal sources use gb_read8.
-	movem.l d3-d5/a1,-(sp)
-	moveq #0,d3
-	move.b d0,d3
-	cmpi.w #$00C0,d3
-	blo.s .dma_general
-	cmpi.w #$00E0,d3
-	blo.s .dma_wram
-	cmpi.w #$00FE,d3
-	blo.s .dma_echo
-	bra.s .dma_general
-.dma_wram:
-	subi.w #$00C0,d3
-	bra.s .dma_direct
-.dma_echo:
-	subi.w #$00E0,d3
-.dma_direct:
-	lsl.w #8,d3
-	lea gb_wram,a0
-	adda.w d3,a0
-	lea gb_oam,a1
-	moveq #39,d4
-.dma_direct_loop:
-	move.l (a0)+,d5
-	cmp.l (a1),d5
-	beq.s .dma_direct_same
-	move.l d5,(a1)
-	move.b #1,gb_video_dirty
-	move.b #1,gb_oam_dirty
-.dma_direct_same:
-	addq.l #4,a1
-	dbf d4,.dma_direct_loop
-	bra.s .dma_done
-.dma_general:
-	lsl.w #8,d3
-	lea gb_oam,a1
-	move.w #159,d4
-.dma_general_loop:
-	move.w d3,d1
-	jsr gb_read8
-	cmp.b (a1),d0
-	beq.s .dma_general_same
-	move.b d0,(a1)
-	move.b #1,gb_video_dirty
-	move.b #1,gb_oam_dirty
-.dma_general_same:
-	addq.l #1,a1
-	addq.w #1,d3
-	dbf d4,.dma_general_loop
-.dma_done:
-	movem.l (sp)+,d3-d5/a1
+	; Queue a two-M-cycle startup/restart. The old transfer remains active
+	; until gb_dma_advance starts the replacement, one byte per M-cycle.
+	move.b d0,gb_dma_request_source
+	move.b #1,gb_dma_requested
 	bra.w .io_done
 .not_oam_dma:
 	cmp.b d2,d0
@@ -711,6 +838,7 @@ gb_tick:
 	add.w gb_cycle_batch,d6
 	clr.w gb_cycle_batch
 	add.l d6,gb_cycle_counter
+	bsr.w gb_dma_advance
 	; Preserve the pre-step divider phase. TIMA is driven by falling edges of
 	; selected divider bits, not an independent period accumulator.
 	moveq #0,d4
@@ -855,6 +983,161 @@ gb_tick:
 	rts
 gb_timer_periods:
 	dc.w 1024,16,64,256
+
+; Advance OAM DMA by d6.w T-cycles. Startup/restart edges are processed one
+; M-cycle at a time; once no pipeline transition is pending, contiguous bytes
+; in the scheduler batch are copied as one bounded run.
+gb_dma_advance:
+	tst.b gb_dma_active
+	bne.s .dma_has_work
+	tst.b gb_dma_starting
+	bne.s .dma_has_work
+	tst.b gb_dma_requested
+	beq.w .dma_advance_done
+.dma_has_work:
+	movem.l d0-d5/a0-a1,-(sp)
+	move.w d6,d5
+	lsr.w #2,d5
+	beq.w .dma_restore
+
+.dma_event_loop:
+	tst.w d5
+	beq.w .dma_restore
+	tst.b gb_dma_starting
+	bne.s .dma_single_cycle
+	tst.b gb_dma_requested
+	bne.s .dma_single_cycle
+	tst.b gb_dma_active
+	beq.w .dma_restore
+	move.w #160,d3
+	sub.w gb_dma_index,d3
+	cmp.w d5,d3
+	bls.s .dma_bulk_count_ready
+	move.w d5,d3
+.dma_bulk_count_ready:
+	bsr.w .dma_copy_run
+	sub.w d3,d5
+	bra.w .dma_event_loop
+
+.dma_single_cycle:
+	tst.b gb_dma_active
+	beq.s .dma_single_no_copy
+	moveq #1,d3
+	bsr.w .dma_copy_run
+.dma_single_no_copy:
+	tst.b gb_dma_starting
+	beq.s .dma_single_no_start
+	move.b gb_dma_start_source,gb_dma_source
+	clr.w gb_dma_index
+	move.b #1,gb_dma_active
+	clr.b gb_dma_starting
+.dma_single_no_start:
+	tst.b gb_dma_requested
+	beq.s .dma_single_done
+	move.b gb_dma_request_source,gb_dma_start_source
+	move.b #1,gb_dma_starting
+	clr.b gb_dma_requested
+.dma_single_done:
+	subq.w #1,d5
+	bra.w .dma_event_loop
+
+; Copy d3.w consecutive bytes from the current source/index. d3 is preserved.
+.dma_copy_run:
+	moveq #0,d1
+	move.b gb_dma_source,d1
+	lsl.w #8,d1
+	add.w gb_dma_index,d1
+	move.w d1,d2
+	lsr.w #8,d2
+	cmpi.w #$00C0,d2
+	bhs.w .dma_run_wram
+	cmpi.w #$00A0,d2
+	bhs.w .dma_run_eram
+	cmpi.w #$0080,d2
+	bhs.s .dma_run_vram
+	cmpi.w #$0040,d2
+	bhs.s .dma_run_romx
+	lea gb_cart_rom,a0
+	cmpi.b #$01,gb_mapper_kind
+	blo.s .dma_run_rom0_ready
+	cmpi.b #$03,gb_mapper_kind
+	bhi.s .dma_run_rom0_ready
+	tst.b gb_mbc1_mode
+	beq.s .dma_run_rom0_ready
+	moveq #0,d2
+	move.b gb_mbc1_upper,d2
+	lsl.l #8,d2
+	lsl.l #8,d2
+	lsl.l #3,d2
+	adda.l d2,a0
+.dma_run_rom0_ready:
+	adda.w d1,a0
+	bra.w .dma_run_copy
+.dma_run_romx:
+	moveq #0,d2
+	move.w gb_rom_bank,d2
+	lsl.l #8,d2
+	lsl.l #6,d2
+	subi.w #$4000,d1
+	lea gb_cart_rom,a0
+	adda.l d2,a0
+	adda.w d1,a0
+	bra.s .dma_run_copy
+.dma_run_vram:
+	subi.w #$8000,d1
+	lea gb_vram,a0
+	adda.w d1,a0
+	bra.s .dma_run_copy
+.dma_run_eram:
+	tst.b gb_ram_enabled
+	beq.s .dma_run_fill_ff
+	cmpi.b #4,gb_ram_bank
+	bhs.s .dma_run_fill_ff
+	subi.w #$A000,d1
+	moveq #0,d2
+	move.b gb_ram_bank,d2
+	lsl.l #8,d2
+	lsl.l #5,d2
+	lea gb_eram,a0
+	adda.l d2,a0
+	adda.w d1,a0
+	bra.s .dma_run_copy
+.dma_run_wram:
+	subi.w #$C000,d1
+	andi.w #$1FFF,d1
+	lea gb_wram,a0
+	adda.w d1,a0
+.dma_run_copy:
+	lea gb_oam,a1
+	adda.w gb_dma_index,a1
+	move.w d3,d4
+	subq.w #1,d4
+.dma_run_copy_loop:
+	move.b (a0)+,(a1)+
+	dbf d4,.dma_run_copy_loop
+	bra.s .dma_run_finish
+.dma_run_fill_ff:
+	lea gb_oam,a1
+	adda.w gb_dma_index,a1
+	move.w d3,d4
+	subq.w #1,d4
+	moveq #-1,d0
+.dma_run_fill_loop:
+	move.b d0,(a1)+
+	dbf d4,.dma_run_fill_loop
+.dma_run_finish:
+	add.w d3,gb_dma_index
+	move.b #1,gb_video_dirty
+	move.b #1,gb_oam_dirty
+	cmpi.w #160,gb_dma_index
+	blo.s .dma_run_return
+	clr.b gb_dma_active
+.dma_run_return:
+	rts
+.dma_restore:
+	movem.l (sp)+,d0-d5/a0-a1
+.dma_advance_done:
+	rts
 ; Convert live DMG tile data and the selected 32x32 BG map into Genesis VRAM.
 ; Plane A is at $C000; tile patterns occupy $0000-$2FFF.  The routine runs at
 ; emulated VBlank and therefore displays original game state, not baked assets.

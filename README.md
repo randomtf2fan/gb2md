@@ -19,19 +19,22 @@ It selects a `.gb`/`.gbc` file, output folder, and trace budget, then streams th
 compiler's output and errors into the window. Generated files default to
 `gui-builds/<rom-name>/`; the original ROM is never modified.
 
-### AI Assistance Disclosure
+### AI assistance disclosure
 
-GB2MD was developed with substantial assistance from AI coding tools, primarily OpenAI Codex.
+GB2MD was developed with substantial assistance from AI coding tools,
+primarily OpenAI Codex. AI assistance was used for code generation, debugging,
+optimization, testing, and documentation. Project direction, requirements,
+physical-hardware testing, and development decisions were guided and reviewed
+by the project maintainer.
 
-AI assistance was used for code generation, debugging, optimization, testing, and documentation. The project's direction, requirements, testing on real hardware, and development decisions were guided and reviewed by the project maintainer.
-
-As with any software developed using automated tools, bugs and inaccuracies may remain. Contributions, bug reports, and independent code reviews are welcome.
+As with any software developed using automated tools, bugs and inaccuracies may
+remain. Contributions, bug reports, and independent code reviews are welcome.
 
 ```sh
 python3 gb2md_gui.py
 ```
 
-For installation, use
+Install the optional GUI dependency with
 `python -m pip install -r requirements-gui.txt` before launching the GUI.
 
 The resulting Genesis image is `<output folder>/recompiled.md`. The CLI remains
@@ -47,6 +50,17 @@ non-commercial redistribution and contain additional module copyrights, so it
 should be obtained and built separately unless redistribution permission and
 all obligations are reviewed. BlastEm is optional and likewise treated as an
 external local test dependency.
+
+The `test_roms/` collection and all input `.gb`/`.gbc` files are local fixtures
+and are ignored by the repository safety rules. The 65 focused unit tests use
+synthetic data and do not require commercial ROMs. Compatibility-suite runs
+require the user to supply the relevant test ROMs separately.
+
+Generated `recompiled.md` files are Mega Drive ROM binaries, not Markdown.
+They include source cartridge data needed by runtime banked reads and therefore
+must not be published when built from a commercial game. Build directories,
+checkpoints, traces, screenshots, logs, and compatibility results are private
+generated artifacts and are ignored by `.gitignore`.
 
 GB2MD does not include or grant rights to commercial game ROMs or Nintendo
 assets, and it is not affiliated with or endorsed by Nintendo or Sega. Users
@@ -114,6 +128,23 @@ python3 run_compat_tests.py test_roms/mooneye-test-suite/acceptance/bits/reg_f.g
 
 Current measured results and limitations are in [COMPATIBILITY.md](COMPATIBILITY.md).
 
+### Original homebrew diagnostic
+
+`make_homebrew_test_rom.py` generates a small original MBC3 external-RAM test.
+It contains no commercial ROM data, Nintendo boot-logo bytes, or extracted
+assets. The diagnostic is intended for GB2MD's documented post-boot execution
+model and checks two RAM banks plus RAM disable/re-enable behavior.
+
+```sh
+python3 make_homebrew_test_rom.py homebrew-mbc3-test.gb
+python3 build_recompiled.py homebrew-mbc3-test.gb \
+  --out build-homebrew-mbc3 --steps 10000
+```
+
+The generated `.gb` and `.md` files are ignored build fixtures, not repository
+source. The Python unit suite verifies the diagnostic's register protocol; the
+native result must still be observed separately through BlastEm.
+
 ## Recompiled gameplay build
 
 Input-dependent paths can be merged without baking input into the output ROM:
@@ -174,15 +205,21 @@ miscompiled. It does not copy the input ROM into output artifacts.
 
 ## Current implementation boundaries
 
-- Native memory helpers, bank-aware dispatch, MBC1/MBC3 ROM selection, timer
+- Native memory helpers, bank-aware dispatch, partial MBC1/MBC3/MBC5 mapping, timer
   scheduling, interrupts, a DMG-to-VDP renderer, controller input, Genesis ROM
   headers/checksums, and bounded automatic input exploration are implemented.
 - Tile maps and tile patterns have separate dirty paths, avoiding redundant
   full pattern uploads during scrolling and map-only updates.
-- OAM DMA is still atomic and lacks the real 160-machine-cycle CPU bus lock.
+- OAM DMA progresses over 160 machine cycles after its startup pipeline in the
+  Python oracle and native runtime. CPU OAM accesses are blocked during an
+  active transfer, restart timing is modeled, and the targeted Mooneye OAM-DMA
+  acceptance set passes on both paths.
+- Native cartridge RAM supports volatile RAM enable/banking for the currently
+  modeled MBC1/MBC3/MBC5 paths. Save-file persistence and MBC3 RTC behavior are
+  not implemented.
 - PPU modes, STAT behavior, window rendering, access restrictions, audio,
-  complete cartridge RAM/RTC/persistence, and some indirect control flow are
-  incomplete.
+  complete mapper/RTC/persistence behavior, OAM corruption, and some indirect
+  control flow are incomplete.
 - Tetris v4 is the strongest gameplay regression. The current Super Mario Land
   candidate leaves the former timer-active stalls, renders World 1-1, advances
   its timer, and executes movement, jump, and collision/death paths; extended

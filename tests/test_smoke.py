@@ -122,6 +122,57 @@ class SmokeTest(unittest.TestCase):
         memory.write(0xE123,0x42)
         self.assertEqual(memory.read(0xC123),0x42)
 
+    def test_oam_dma_has_two_cycle_startup_and_progressive_copy(self):
+        from gb_cpu import Memory
+        memory=Memory(bytes(0x8000));memory.wram[:0xA0]=bytes(range(0xA0))
+        memory.oam[:]=b"\xCC"*0xA0;memory.write(0xFF46,0xC0)
+        self.assertEqual(memory.oam[0],0xCC)
+        memory.tick(4)  # Request is armed; OAM remains accessible this cycle.
+        self.assertFalse(memory.dma_active);self.assertEqual(memory.read(0xFE00),0xCC)
+        memory.tick(4)  # DMA becomes active, but has not copied byte zero yet.
+        self.assertTrue(memory.dma_active);self.assertEqual(memory.read(0xFE00),0xFF)
+        self.assertEqual(memory.oam[0],0xCC)
+        memory.tick(4);self.assertEqual(memory.oam[0],0)
+        self.assertEqual(memory.oam[1],0xCC)
+        memory.tick(4*159)
+        self.assertFalse(memory.dma_active);self.assertEqual(memory.read(0xFE9F),0x9F)
+
+    def test_oam_dma_restart_keeps_old_transfer_running_until_new_start(self):
+        from gb_cpu import Memory
+        memory=Memory(bytes(0x8000))
+        memory.wram[:0xA0]=b"\x11"*0xA0
+        memory.wram[0x1000:0x10A0]=b"\x22"*0xA0
+        memory.write(0xFF46,0xC0);memory.tick(12)
+        self.assertEqual(memory.oam[0],0x11)
+        memory.write(0xFF46,0xD0)
+        memory.tick(4);self.assertEqual(memory.oam[1],0x11)
+        memory.tick(4);self.assertEqual(memory.oam[2],0x11);self.assertEqual(memory.dma_index,0)
+        memory.tick(4);self.assertEqual(memory.oam[0],0x22);self.assertEqual(memory.dma_index,1)
+
+    def test_oam_dma_high_source_pages_mirror_wram_not_io(self):
+        from gb_cpu import Memory
+        memory=Memory(bytes(0x8000));memory.wram[0x1F00:0x1FA0]=bytes(range(0xA0))
+        memory.io[:]=b"\xEE"*0x80
+        memory.write(0xFF46,0xFF);memory.tick(4*(2+160))
+        self.assertEqual(memory.oam,bytes(range(0xA0)))
+
+    def test_cpu_records_bytes_fetched_after_dma_bus_transition(self):
+        from gb_cpu import CPU, Memory
+        memory=Memory(bytes(0x8000));memory.oam[1]=0x04
+        cpu=CPU(memory);cpu.pc=0xFE01
+        memory.write(0xFF46,0xC0);memory.tick(4)  # DMA is in startup.
+        cpu.step()
+        self.assertEqual(cpu.last_pc,0xFE01)
+        self.assertEqual(cpu.last_instruction,b"\xFF")
+        self.assertEqual(cpu.pc,0x0038)
+
+    def test_native_oam_dma_is_progressive_and_blocks_cpu_oam_access(self):
+        runtime=(ROOT/"runtime_68000.s").read_text()
+        self.assertIn("gb_dma_advance:",runtime)
+        self.assertIn("move.b #1,gb_dma_requested",runtime)
+        self.assertIn("tst.b gb_dma_active\n\tbne.s .oam_unchanged",runtime)
+        self.assertNotIn(".dma_direct_loop:",runtime)
+
     def test_joypad_matrix_selects_active_low_rows(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location("cpu", ROOT / "gb_cpu.py")
@@ -211,6 +262,14 @@ class SmokeTest(unittest.TestCase):
         self.assertLess(read.index("cmpi.w #$FF00,d1"),read.index(".read_low:"))
         self.assertLess(write.index("cmpi.w #$C000,d1"),write.index("cmpi.w #$8000,d1"))
         self.assertLess(write.index("cmpi.w #$FF00,d1"),write.index(".write_low:"))
+        # Native external RAM must not silently alias every mapper bank to
+        # bank zero. MBC1 mode/upper writes and MBC3 RAM/RTC selection have
+        # distinct handlers, while unsupported RTC selectors stay inaccessible.
+        self.assertIn("gb_mbc1_mode equ",runtime)
+        self.assertIn(".mapper_mbc1:",write)
+        self.assertIn(".mapper_mbc3:",write)
+        self.assertIn("move.b d0,gb_ram_bank",write)
+        self.assertIn("cmpi.b #4,gb_ram_bank",read)
 
     def test_native_scf_and_ccf_preserve_z_and_update_carry(self):
         import importlib.util
