@@ -2,6 +2,18 @@ import json, os, pathlib, subprocess, sys, tempfile, unittest
 
 ROOT = pathlib.Path(__file__).parents[1]
 
+def constant_far_call_diagnostic_rom(mapper=0x11,target_bank=2,reverse=False):
+    """Original B/HL far call; verify callback and restored ROM data mapping."""
+    rom=bytearray(0x10000);rom[0x147:0x14A]=bytes([mapper,1,0])
+    setup=bytes([0x21,0,0x45,0x06,target_bank]) if reverse else bytes([0x06,target_bank,0x21,0,0x45])
+    program=bytes.fromhex('3e01e090')+setup+bytes.fromhex('cd0003fa0046ea01c018fe')
+    rom[0x100:0x100+len(program)]=program
+    helper=bytes.fromhex('f090f578e090ea0020010e03c5e9c178e090ea0020c9')
+    rom[0x300:0x300+len(helper)]=helper
+    offset=target_bank*0x4000+0x500;rom[offset:offset+6]=bytes.fromhex('3e42ea00c0c9')
+    rom[0x4600]=0x99;rom[0x8600]=0x55
+    return bytes(rom)
+
 def large_dispatch_diagnostic_rom():
     """Original NOP stream makes the native dispatcher exceed word-branch range."""
     rom=bytearray(0x8000);rom[0x100:0x103]=bytes.fromhex('c35001')
@@ -17,6 +29,25 @@ def inline_hl_table_diagnostic_rom(preserve_bc=True):
     rom[0x120:0x126]=bytes.fromhex('40015001ffff')
     rom[0x140:0x147]=bytes.fromhex('3e11ea00c018fe')
     rom[0x150:0x157]=bytes.fromhex('3e42ea00c018fe')
+    return bytes(rom)
+
+def rom_only_upper_table_diagnostic_rom():
+    """Original fixed-ROM code indexing a table in the fixed upper window."""
+    rom=bytearray(inline_hl_table_diagnostic_rom());rom[0x103:0x105]=bytes.fromhex('0042')
+    rom[0x4200:0x4206]=rom[0x120:0x126]
+    return bytes(rom)
+
+def bitmask_dispatch_diagnostic_rom(mask=1):
+    """Original eight-button scan with separate callback/return roots."""
+    rom=bytearray(0x8000)
+    program=bytes([0x3E,mask])+bytes.fromhex('218001cb2738062323232318f62a5f2a572a666fd5e9')
+    rom[0x100:0x100+len(program)]=program
+    for index in range(8):
+        target=0x200+index*8
+        rom[0x180+index*4:0x184+index*4]=bytes([0xC0,1,target&255,target>>8])
+        callback=bytes([0x3E,0x42 if index==7 else 0x11])+bytes.fromhex('ea00c0c9')
+        rom[target:target+len(callback)]=callback
+    rom[0x1C0:0x1C7]=bytes.fromhex('3e99ea01c018fe')
     return bytes(rom)
 
 def bank_shadow_diagnostic_rom(use_helper=True):
@@ -35,6 +66,14 @@ def bank_context_diagnostic_rom():
     rom[0x100:0x100+len(program)]=program
     rom[0x8100:0x8105]=bytes.fromhex('2102c034c9')
     rom[0x8200:0x8207]=bytes.fromhex('3e42ea00c018fe')
+    return bytes(rom)
+
+def long_banked_table_diagnostic_rom(index=65):
+    """Original banked lookup whose selected entry lies past the old64 limit."""
+    rom=bytearray(banked_table_diagnostic_rom());rom[0x101]=index
+    rom[0x4101:0x4103]=bytes.fromhex('0046')
+    table=bytes.fromhex('010043')*index+bytes.fromhex('020044ffffff')
+    rom[0x4600:0x4600+len(table)]=table
     return bytes(rom)
 
 def banked_table_diagnostic_rom():
@@ -142,6 +181,84 @@ def banked_rst_dispatch_diagnostic_rom():
     return bytes(rom)
 
 class SmokeTest(unittest.TestCase):
+    def test_constant_far_call_closure_and_bank_restore(self):
+        import trace_recompiler as trace
+        from gb_cpu import CPU,Memory
+        for mapper,bank,reverse in ((0x11,2,False),(0x11,2,True),(0,1,False)):
+            with self.subTest(mapper=mapper,reverse=reverse),tempfile.TemporaryDirectory() as d:
+                rom=constant_far_call_diagnostic_rom(mapper,bank,reverse);m=Memory(rom);c=CPU(m)
+                for _ in range(80):c.step()
+                self.assertEqual(m.wram[:2],bytes([0x42,0x99]));self.assertEqual(m.rom_bank,1)
+                root=pathlib.Path(d);source=root/'far-call.gb';source.write_bytes(rom)
+                blocks=trace.compile_trace(source,root/'out',2)
+                self.assertIn((bank,0x4500),{(b['bank'],b['pc']) for b in blocks})
+                self.assertIn((0,0x30E),{(b['bank'],b['pc']) for b in blocks})
+                self.assertEqual(json.loads((root/'out'/'trace-profile.json').read_text())['constant_far_call_targets'],1)
+
+    def test_constant_far_call_rejects_unverified_trampolines(self):
+        from trace_recompiler import constant_far_call_targets
+        original=constant_far_call_diagnostic_rom()
+        self.assertEqual(constant_far_call_targets(original,0,0x104),[(2,0x4500)])
+        for address,value in ((0x301,0x04),(0x305,0x91),(0x30A,0x0F),(0x30D,0xE1)):
+            rom=bytearray(original);rom[address]=value
+            self.assertEqual(constant_far_call_targets(rom,0,0x104),[])
+        rom=bytearray(original);rom[0x308]=rom[0x314]=0x40
+        self.assertEqual(constant_far_call_targets(rom,0,0x104),[])
+        self.assertEqual(constant_far_call_targets(original,0,0x3FFC),[])
+
+    def test_constant_far_call_aliases_and_bank_identity(self):
+        from trace_recompiler import constant_far_call_targets
+        original=constant_far_call_diagnostic_rom();rom=bytearray(original)
+        rom[0xC104:0xC10C]=original[0x104:0x10C]
+        self.assertEqual(constant_far_call_targets(rom,3,0x4104),[(2,0x4500)])
+        self.assertEqual(constant_far_call_targets(rom,1,0x4104),[])
+        helper=bytearray(original[0x300:0x316]);helper[10:12]=bytes.fromhex('2e03')
+        rom[0x320:0x336]=helper;rom[0x300:0x303]=bytes.fromhex('c32003')
+        self.assertEqual(constant_far_call_targets(rom,0,0x104),[(2,0x4500)])
+        rom[0x320:0x323]=bytes.fromhex('c30003')
+        self.assertEqual(constant_far_call_targets(rom,0,0x104),[])
+        self.assertEqual(constant_far_call_targets(constant_far_call_diagnostic_rom(0x19,0),0,0x104),[(0,0x4500)])
+
+    @unittest.skipUnless(os.environ.get('GB2MD_NATIVE_TESTS')=='1','opt-in external BlastEm integration')
+    def test_native_constant_far_call_bank_restore(self):
+        from build_recompiled import build
+        from run_compat_tests import _run_in_pty,_blastem_values
+        for mapper,bank in ((0x11,2),(0x19,0),(0,1)):
+            with self.subTest(mapper=mapper,bank=bank),tempfile.TemporaryDirectory() as d:
+                root=pathlib.Path(d);source=root/'original.gb';source.write_bytes(constant_far_call_diagnostic_rom(mapper,bank))
+                build(source,root/'out',2)
+                commands='frames 600\np/x [$ff2300].b [$ff2301].b [$ff001e].w [$ff0018].l\nquit\n'
+                code,output,timed=_run_in_pty([os.environ['GB2MD_BLASTEM'],'-d',str(root/'out'/'recompiled.md')],commands,30)
+                self.assertFalse(timed,output);self.assertEqual(code,0,output)
+                values=_blastem_values(output)
+                self.assertEqual([values.get(a) for a in ('FF2300.b','FF2301.b','FF001E.w','FF0018.l')],[0x42,0x99,1,0],output)
+
+    def test_banked_table_discovers_indices_beyond_64(self):
+        import trace_recompiler as trace
+        from gb_cpu import CPU,Memory
+        for index in (65,127):
+            with self.subTest(index=index),tempfile.TemporaryDirectory() as d:
+                rom=long_banked_table_diagnostic_rom(index);m=Memory(rom);c=CPU(m)
+                for _ in range(70):c.step()
+                self.assertEqual(m.wram[0],0x42)
+                root=pathlib.Path(d);source=root/'long-table.gb';source.write_bytes(rom)
+                blocks=trace.compile_trace(source,root/'out',2)
+                self.assertIn((2,0x4400),{(b['bank'],b['pc']) for b in blocks})
+                report=json.loads((root/'out'/'trace-profile.json').read_text())['banked_pointer_tables'][0]
+                self.assertEqual(report['entries'],index+1)
+                self.assertEqual(report['stop_reason'],'entry_limit' if index==127 else 'non_code_pointer')
+
+    def test_banked_table_reports_budget_and_retains_hard_bound(self):
+        from trace_recompiler import banked_pointer_table_targets
+        rom=long_banked_table_diagnostic_rom(127);diagnostic={}
+        targets=banked_pointer_table_targets(rom,1,0x4100,64,diagnostic)
+        self.assertNotIn((2,0x4400),targets)
+        self.assertEqual((diagnostic['entries'],diagnostic['stop_reason']),(64,'entry_limit'))
+        diagnostic={}
+        targets=banked_pointer_table_targets(rom,1,0x4100,1000000,diagnostic)
+        self.assertIn((2,0x4400),targets)
+        self.assertEqual(diagnostic['entry_limit'],128)
+
     def test_inline_hl_table_closure_and_validation(self):
         import trace_recompiler as trace
         from gb_cpu import CPU,Memory
@@ -155,6 +272,48 @@ class SmokeTest(unittest.TestCase):
                 self.assertIn((0,0x150),{(b['bank'],b['pc']) for b in blocks})
                 altered=bytearray(rom);altered[0x105]=0xF3
                 self.assertIsNone(trace.hl_dispatch_table(altered,0,0x102))
+
+    def test_rom_only_upper_table_needs_no_bank_inference(self):
+        import trace_recompiler as trace
+        from gb_cpu import CPU,Memory
+        rom=rom_only_upper_table_diagnostic_rom();m=Memory(rom);c=CPU(m)
+        for _ in range(40):c.step()
+        self.assertEqual(m.wram[0],0x42)
+        with tempfile.TemporaryDirectory() as d:
+            root=pathlib.Path(d);source=root/'upper-table.gb';source.write_bytes(rom)
+            blocks=trace.compile_trace(source,root/'out',2)
+            self.assertIn((0,0x150),{(b['bank'],b['pc']) for b in blocks})
+
+    def test_bitmask_dispatch_closes_callback_and_return(self):
+        import trace_recompiler as trace
+        from gb_cpu import CPU,Memory
+        for mask,expected in ((1,0x42),(0x80,0x11),(0x81,0x11)):
+            rom=bitmask_dispatch_diagnostic_rom(mask);m=Memory(rom);c=CPU(m)
+            for _ in range(100):c.step()
+            self.assertEqual(list(m.wram[:2]),[expected,0x99])
+        with tempfile.TemporaryDirectory() as d:
+            root=pathlib.Path(d);source=root/'bitmask.gb';source.write_bytes(rom)
+            blocks=trace.compile_trace(source,root/'out',2)
+            keys={(b['bank'],b['pc']) for b in blocks}
+            self.assertTrue({(0,0x1C0),(0,0x238)}<=keys)
+            report=json.loads((root/'out'/'trace-profile.json').read_text())
+            self.assertEqual(report['bitmask_dispatch_targets'],9)
+
+    def test_bitmask_dispatch_rejects_changed_loop_and_unknown_bank(self):
+        from trace_recompiler import bitmask_dispatch_targets
+        rom=bytearray(bitmask_dispatch_diagnostic_rom())
+        for offset in (0x106,0x10E,0x117):
+            altered=bytearray(rom);altered[offset]^=1
+            self.assertEqual(bitmask_dispatch_targets(altered,0,0x102),[])
+        altered=bytearray(rom);altered[0x180:0x182]=b'\xff\xff'
+        self.assertEqual(bitmask_dispatch_targets(altered,0,0x102),[])
+        # A ninth valid pair must not widen an eight-bit dispatch table.
+        altered=bytearray(rom);altered[0x1A0:0x1A4]=bytes.fromhex('c0010003')
+        self.assertNotIn((0,0x300),bitmask_dispatch_targets(altered,0,0x102))
+        rom[0x103:0x105]=bytes.fromhex('0042');rom[0x4200:0x4220]=rom[0x180:0x1A0]
+        self.assertEqual(len(bitmask_dispatch_targets(rom,0,0x102)),9)
+        rom[0x147]=1
+        self.assertEqual(bitmask_dispatch_targets(rom,0,0x102),[])
 
     def test_constant_bank_shadow_and_setter_closure(self):
         import trace_recompiler as trace
@@ -370,15 +529,16 @@ class SmokeTest(unittest.TestCase):
     def test_native_static_dispatch_discovery(self):
         from build_recompiled import build
         from run_compat_tests import _run_in_pty,_blastem_values
-        for name,fixture in (('hl-table',hl_dispatch_diagnostic_rom),('bank-call',constant_bank_call_diagnostic_rom),('bank-table',banked_table_diagnostic_rom),('bank-context',bank_context_diagnostic_rom),('bank-shadow',bank_shadow_diagnostic_rom),('inline-hl',inline_hl_table_diagnostic_rom),('large-static',large_dispatch_diagnostic_rom)):
+        for name,fixture in (('hl-table',hl_dispatch_diagnostic_rom),('bank-call',constant_bank_call_diagnostic_rom),('bank-table',banked_table_diagnostic_rom),('bank-context',bank_context_diagnostic_rom),('bank-shadow',bank_shadow_diagnostic_rom),('inline-hl',inline_hl_table_diagnostic_rom),('upper-rom-table',rom_only_upper_table_diagnostic_rom),('bitmask',bitmask_dispatch_diagnostic_rom),('large-static',large_dispatch_diagnostic_rom),('long-table',long_banked_table_diagnostic_rom),('last-table-entry',lambda:long_banked_table_diagnostic_rom(127))):
             with self.subTest(name=name),tempfile.TemporaryDirectory() as d:
                 root=pathlib.Path(d);source=root/'original.gb';source.write_bytes(fixture())
                 build(source,root/'out',2)
-                commands='frames 600\np/x [$ff2300].b [$ff0018].l\nquit\n'
+                commands='frames 600\np/x [$ff2300].b [$ff2301].b [$ff0018].l\nquit\n'
                 code,output,timed=_run_in_pty([os.environ['GB2MD_BLASTEM'],'-d',str(root/'out'/'recompiled.md')],commands,30)
                 values=_blastem_values(output)
                 self.assertFalse(timed,output);self.assertEqual(code,0,output)
                 self.assertEqual([values.get(a) for a in ('FF2300.b','FF0018.l')],[0x42,0],output)
+                if name=='bitmask':self.assertEqual(values.get('FF2301.b'),0x99,output)
 
     @unittest.skipUnless(os.environ.get('GB2MD_NATIVE_TESTS')=='1','opt-in external BlastEm integration')
     def test_native_joypad_selected_rows(self):

@@ -185,10 +185,45 @@ context propagation instead of assuming all accepted sequences have equal size.
 `banked_pointer_table_targets()` recognizes a verified three-byte lookup
 sequence that returns an address in HL and stores a selected bank in WRAM or
 HRAM. Each ROM table entry contains `bank, address_low, address_high`. It reads
-at most 64 entries and requires two valid entries, validates physical bank and
-instruction boundaries, and rejects unknown code or I/O state operands. It
+at most 128 entries and requires two valid entries, validates physical bank and
+ROM bounds, and rejects unknown code or I/O state operands. It
 does not infer arbitrary far-call conventions. Its targets have a separate
 `banked_pointer_table_targets` counter and join the indirect-target aggregate.
+
+The 128-entry ceiling follows this helper's exact arithmetic: doubling a byte
+index is non-overflowing for indices 0..127. Higher byte values produce
+misaligned offsets and are not inferred as aligned triples. An optional
+`diagnostics` dictionary records the table, effective budget, valid entry
+count, unique targets and stop reason. Trace/build reports expose these as
+`banked_pointer_tables`. Entry limits produce a warning; invalid pointers,
+unmapped/unsupported targets and window boundaries have distinct stop reasons.
+This prevents a bounded scan from silently looking like complete coverage.
+
+`constant_far_call_targets()` handles constant B=bank / HL=address setup in
+either order followed by CALL or JP through a verified fixed-ROM helper. The
+helper must save its bank, select B, push a self-consistent return trampoline,
+JP(HL), restore the bank and RET; bounded fixed-ROM aliases are accepted.
+Discovery includes both the callee and that return entry, since ordinary
+fallthrough stops at JP(HL). Counts appear as `constant_far_call_targets`
+and `constant_far_call_returns`. Original native fixtures verify the callback,
+restored data bank, ROM-only behavior and MBC5 bank zero. These are coverage
+additions: the helper's instructions still execute as native code.
+
+`bitmask_dispatch_targets()` recognizes an exact MSB-first input-bit scan.
+An SLA/conditional-loop sequence advances a ROM pointer by four bytes per
+unset bit; the selected record holds a return address followed by a callback.
+The dispatcher pushes the return address and jumps to the callback. Static
+closure therefore seeds both addresses, not just the callback. Eight input
+bits bound the scan to eight records, and invalid pointers terminate it.
+Unknown upper-window mappings and altered instruction sequences are rejected.
+The separate `bitmask_dispatch_targets` count is included in trace/build
+reports. Original tests exercise bit priority, the last bit, return execution,
+signature rejection and ROM-only versus unknown bank mapping. This is bounded
+pattern recognition, not general computed-jump analysis.
+
+ROM-only code may also index a pointer table in the fixed upper ROM window.
+The table reader maps that window directly instead of requiring an inferred
+selected bank.
 
 `bank_analysis.py` adds a limited bank-effect proof. Starting after a constant
 mapper write, `fixed_bank_context_targets()` follows fixed-ROM control flow for

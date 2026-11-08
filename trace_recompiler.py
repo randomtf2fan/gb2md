@@ -130,6 +130,79 @@ def constant_bank_call_targets(rom,pc):
     site=constant_bank_call_site(rom,pc)
     return site[1] if site is not None else []
 
+def constant_far_call_targets(rom,bank,pc,diagnostics=None):
+    """Resolve constant B=bank / HL=target calls through a verified trampoline.
+
+    Accept either setup order and CALL/JP, including bounded fixed-ROM aliases.
+    The helper must save the current bank, select B, push its own return
+    trampoline, JP(HL), then restore the saved bank and RET. No source-game
+    addresses, assumed caller-bank invariants or replacement CPU semantics.
+    """
+    if len(rom)<=0x147 or not 0<=pc<0x8000:return []
+    if pc+8>(0x4000 if pc<0x4000 else 0x8000):return []
+    offset=pc if pc<0x4000 else bank*0x4000+pc-0x4000
+    raw=rom[offset:offset+8]
+    if len(raw)!=8 or raw[5] not in (0xCD,0xC3):return []
+    if raw[0]==0x06 and raw[2]==0x21:value,target=raw[1],raw[3]|raw[4]<<8
+    elif raw[0]==0x21 and raw[3]==0x06:value,target=raw[4],raw[1]|raw[2]<<8
+    else:return []
+    if not 0x100<=target<0x8000:return []
+    helper=raw[6]|raw[7]<<8;seen=set()
+    for _ in range(4):
+        if helper in seen or not 0<=helper<0x4000:return []
+        seen.add(helper)
+        if helper+3<=min(len(rom),0x4000) and rom[helper]==0xC3:
+            helper=rom[helper+1]|rom[helper+2]<<8;continue
+        break
+    else:return []
+    if helper+22>min(len(rom),0x4000):return []
+    body=rom[helper:helper+22]
+    if (body[0]!=0xF0 or body[2:5]!=bytes.fromhex('f578e0') or body[6]!=0xEA
+        or body[9]!=0x01 or body[12:17]!=bytes.fromhex('c5e9c178e0')
+        or body[18]!=0xEA or body[21]!=0xC9):return []
+    if not 0x80<=body[1]<0xFF or not body[1]==body[5]==body[17]:return []
+    register=body[7]|body[8]<<8
+    if body[7:9]!=body[19:21] or (body[10]|body[11]<<8)!=helper+14:return []
+    # ROM-only cartridges ignore the helper's mapper write and retain bank1.
+    if rom[0x147] in (0,8,9) and not 0x2000<=register<0x4000:return []
+    selected_banks=[1] if rom[0x147] in (0,8,9) else _selected_bank_candidates(rom,value,register)
+    targets=list(dict.fromkeys((0 if target<0x4000 else selected,target)
+                for selected in selected_banks
+                if target<0x4000 or selected*0x4000+target-0x4000<len(rom)))
+    if targets and diagnostics is not None:diagnostics['return_target']=(0,helper+14)
+    return targets
+
+def bitmask_dispatch_targets(rom,bank,pc):
+    """Resolve an exact MSB-first bit scan over eight return/callback pairs.
+
+    SLA A shifts one input bit into carry; each unset bit advances HL by four.
+    A zero mask loops rather than selecting a ninth record. Both pointers in
+    each record are executable roots: the callback RETs to the pushed address.
+    Unknown fixed-ROM upper-window mappings and altered scan loops are rejected.
+    """
+    signature=bytes.fromhex('cb2738062323232318f62a5f2a572a666fd5e9')
+    def read(address,size):
+        if not 0<=address<0x8000 or address+size>(0x4000 if address<0x4000 else 0x8000):return b''
+        if address<0x4000:offset=address
+        elif pc>=0x4000:offset=bank*0x4000+address-0x4000
+        elif len(rom)>0x147 and rom[0x147] in (0,8,9):offset=address
+        else:return b''
+        return rom[offset:offset+size]
+    head=read(pc,3)
+    if len(head)!=3 or head[0]!=0x21 or read(pc+3,len(signature))!=signature:return []
+    table=head[1]|head[2]<<8;targets=[];records=0
+    for index in range(8):
+        record=read(table+4*index,4)
+        if len(record)!=4:break
+        pair=[]
+        for offset in (0,2):
+            target=record[offset]|record[offset+1]<<8;opcode=read(target,1)
+            if target<0x100 or not opcode or family(opcode[0]) in ('INVALID','STOP'):break
+            pair.append((0 if target<0x4000 else (bank if pc>=0x4000 else 1),target))
+        if len(pair)!=2:break
+        records+=1;targets.extend(pair)
+    return list(dict.fromkeys(targets)) if records>=2 else []
+
 def hl_dispatch_table(rom,bank,pc):
     """Track a ROM table through a bounded, bank-stable pointer lookup.
 
@@ -176,7 +249,7 @@ def hl_dispatch_table(rom,bank,pc):
         else:return None
     return None
 
-def banked_pointer_table_targets(rom,bank,pc,max_entries=64):
+def banked_pointer_table_targets(rom,bank,pc,max_entries=128,diagnostics=None):
     """Recognize a bounded bank/lo/hi lookup returning HL and a bank byte.
 
     The exact index/three-byte-load sequence is verified, while table, index
@@ -199,12 +272,16 @@ def banked_pointer_table_targets(rom,bank,pc,max_entries=64):
     index_address=raw[7]|raw[8]<<8;bank_address=raw[21]|raw[22]<<8
     is_work_ram=lambda a:0xC000<=a<0xE000 or 0xFF80<=a<0xFFFF
     if not is_work_ram(index_address) or not is_work_ram(bank_address):return []
-    table=raw[1]|raw[2]<<8;targets=[];entries=0
-    for index in range(min(max_entries,64)):
+    # The doubled byte index is exact for A=0..127; larger A values overflow
+    # before the following addition. Cover that aligned range, not just an
+    # arbitrary prefix. Never infer misaligned higher-index targets here.
+    table=raw[1]|raw[2]<<8;targets=[];entries=0;limit=max(0,min(max_entries,128))
+    stop_reason='entry_limit'
+    for index in range(limit):
         entry=read(table+3*index,3)
-        if entry is None:break
+        if entry is None:stop_reason='table_boundary';break
         value,target=entry[0],entry[1]|entry[2]<<8
-        if not 0x100<=target<0x8000:break
+        if not 0x100<=target<0x8000:stop_reason='non_code_pointer';break
         banks=_selected_bank_candidates(rom,value,0x2000)
         candidates=[]
         for active_bank in banks:
@@ -214,8 +291,12 @@ def banked_pointer_table_targets(rom,bank,pc,max_entries=64):
             size=instruction_length(rom[offset])
             if offset+size>len(rom) or target+size>(0x4000 if target<0x4000 else 0x8000):continue
             candidates.append((0 if target<0x4000 else active_bank,target))
-        if not candidates:break
+        if not candidates:stop_reason='no_valid_target';break
         targets.extend(candidates);entries+=1
+    if diagnostics is not None:
+        diagnostics.update(bank=bank,pc=pc,table=table,entry_limit=limit,
+                           entries=entries,stop_reason=stop_reason,
+                           unique_targets=len(set(targets)),accepted=entries>=2)
     return list(dict.fromkeys(targets)) if entries>=2 else []
 
 def parse_input_script(spec: str):
@@ -599,7 +680,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
     # wall corrections, and similar input-dependent branches do not require an
     # exact frame script merely to avoid gb_missing_block.
     frontier=collections.deque(key for key in first if key[1] < 0x8000)
-    expanded=set();indirect_table_targets=set();hl_table_targets=set();rst_table_targets=set();banked_thunk_targets=set();constant_bank_targets=set();far_table_targets=set();bank_context_targets=set()
+    expanded=set();indirect_table_targets=set();hl_table_targets=set();rst_table_targets=set();banked_thunk_targets=set();constant_bank_targets=set();far_table_targets=set();bank_context_targets=set();far_table_reports=[];far_call_targets=set();far_call_returns=set();bitmask_targets=set()
     def rom_key(source_key,address):
         address &= 0xFFFF;source_bank,source_pc=source_key
         if address < 0x4000:return (0,address)
@@ -648,6 +729,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
             address=(table+index*2)&0xFFFF
             if address+1>=0x8000:break
             if address<0x4000:entry_offset=address
+            elif rom[0x147] in (0,8,9):entry_offset=address
             elif source_bank or (0x4000<=source_key[1]<0x8000 and 0x19<=rom[0x147]<=0x1E):entry_offset=source_bank*0x4000+address-0x4000
             else:break
             if entry_offset+1>=len(rom):break
@@ -710,6 +792,14 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
         elif fam not in ("RET","RETI","JP_HL","HALT","STOP","INVALID","UNCLASSIFIED"):
             successors=[fall]
         for address in successors:add_rom_block(rom_key(key,address))
+        if op in (0x06,0x21):
+            far_call_diagnostic={}
+            for target_key in constant_far_call_targets(rom,bank,pc,diagnostics=far_call_diagnostic):
+                add_rom_block(target_key)
+                if target_key in first:far_call_targets.add(target_key)
+            if far_call_diagnostic:
+                return_key=far_call_diagnostic['return_target'];add_rom_block(return_key)
+                if return_key in first:far_call_returns.add(return_key)
         if op==0x3E and pc<0x4000:
             site=constant_bank_call_site(rom,pc)
             if site is not None:
@@ -726,10 +816,19 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
         # at least two consecutive, valid ROM code pointers and stop at the
         # first invalid entry; this avoids treating arbitrary data as code.
         if op==0x21 and pc+7<=0x8000:
-            for target_key in banked_pointer_table_targets(rom,bank,pc):
+            for target_key in bitmask_dispatch_targets(rom,bank,pc):
+                add_rom_block(target_key)
+                if target_key in first:
+                    bitmask_targets.add(target_key);indirect_table_targets.add(target_key)
+            table_diagnostic={}
+            for target_key in banked_pointer_table_targets(rom,bank,pc,diagnostics=table_diagnostic):
                 add_rom_block(target_key)
                 if target_key in first:
                     far_table_targets.add(target_key);indirect_table_targets.add(target_key)
+            if table_diagnostic:
+                far_table_reports.append(table_diagnostic)
+                if table_diagnostic['stop_reason']=='entry_limit':
+                    print(f"warning: banked table at ${bank:02X}:${pc:04X} reached its {table_diagnostic['entry_limit']}-entry discovery limit",flush=True)
             if pc<0x4000:sequence_offset=pc
             elif bank:sequence_offset=bank*0x4000+pc-0x4000
             else:sequence_offset=-1
@@ -795,7 +894,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
                 block["idle_wait"]=True
     for block in blocks:block["native_lowered"]=native_body(block) is not None
     out.mkdir(parents=True,exist_ok=True)
-    (out/"trace-profile.json").write_text(json.dumps({"input":str(rom_path),"steps_per_scenario":steps,"auto_steps":auto_steps,"auto_inputs":auto_inputs,"total_steps_executed":sum(s["steps_executed"] for s in scenario_reports),"dynamic_unique_blocks":dynamic_unique_block_count,"indirect_table_targets":len(indirect_table_targets),"hl_pointer_table_targets":len(hl_table_targets),"rst_inline_table_targets":len(rst_table_targets),"banked_thunk_targets":len(banked_thunk_targets),"constant_bank_call_targets":len(constant_bank_targets),"banked_pointer_table_targets":len(far_table_targets),"bank_context_targets":len(bank_context_targets),"total_blocks_after_static_closure":len(blocks),"input_exploration":exploration_report,"scenarios":scenario_reports,"blocks":blocks},indent=2)+"\n")
+    (out/"trace-profile.json").write_text(json.dumps({"input":str(rom_path),"steps_per_scenario":steps,"auto_steps":auto_steps,"auto_inputs":auto_inputs,"total_steps_executed":sum(s["steps_executed"] for s in scenario_reports),"dynamic_unique_blocks":dynamic_unique_block_count,"indirect_table_targets":len(indirect_table_targets),"hl_pointer_table_targets":len(hl_table_targets),"bitmask_dispatch_targets":len(bitmask_targets),"rst_inline_table_targets":len(rst_table_targets),"banked_thunk_targets":len(banked_thunk_targets),"constant_bank_call_targets":len(constant_bank_targets),"constant_far_call_targets":len(far_call_targets),"constant_far_call_returns":len(far_call_returns),"banked_pointer_table_targets":len(far_table_targets),"banked_pointer_tables":far_table_reports,"bank_context_targets":len(bank_context_targets),"total_blocks_after_static_closure":len(blocks),"input_exploration":exploration_report,"scenarios":scenario_reports,"blocks":blocks},indent=2)+"\n")
     emit_native_blocks(blocks,out)
     return blocks
 

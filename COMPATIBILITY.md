@@ -1,5 +1,41 @@
 # GB2MD compatibility status
 
+## Bounded discovery milestone — 2026-11-08
+
+**119/119 tests PASS with native integration enabled**: 114 ordinary tests
+and five opt-in native methods. Fresh frontend traces, builds and documented
+protocol checks also pass **14/14 Mooneye timer/reg_f cases in both Python and
+native BlastEm execution**. Extra native checks verify callback return writes
+and restored ROM-bank data. CPU, timer, DMA and Genesis runtime sources are
+unchanged. Native Blargg serial observation and broader PPU/DMA reruns remain open.
+
+Pokémon's former `$03:$7113` target is entry 65 of a bank/address table whose
+reader stopped at 64. The verified helper's aligned byte-index range supports
+128 entries; discovery now uses that bound and reports each scan's stop reason.
+The actual table has 99 valid entries and 93 targets. This was a coverage limit,
+not an established mapper defect.
+
+Selecting NEW NAME then exposed an untraced B/HL far callback at `$1C:$576C`.
+Verified far-call discovery now includes both callback and bank-restoring return
+trampoline. The next keyboard-selection trap at `$01:$6692` used an MSB-first
+bit scan over return/callback pairs; bounded recognition now covers that exact
+instruction pattern. All operands remain variable; no game addresses select
+compiler behavior. ROM-only upper-window pointer tables are also handled.
+
+The latest private native build accepts letters, confirms a custom player name,
+accepts a preset rival name and advances through the final introduction without
+those older traps. It then traps at `$17:$40B0` during room initialization.
+The current bank and bank shadow agree; a fixed-ROM dispatcher loads its callback
+from WRAM and jumps through HL. That unresolved data-driven target needs further
+coverage analysis. **The room, overworld and playable Pokémon gameplay remain
+unverified.** The image has 32,254 native blocks and is close to the supported
+4 MiB limit; no game-speed improvement is claimed.
+
+Existing checkpoints are unchanged. The GUI uses its sibling compiler and
+receives these fixes after updating and recompiling; this does not update old
+ROM outputs. Other games were not freshly playtested in this pass. Older
+sections below are historical results, not current regression claims.
+
 ## Paged dispatch and naming follow-up — 2026-11-08
 
 **110/110 unit/native tests PASS** (106 ordinary, four opt-in native methods).

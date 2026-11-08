@@ -84,22 +84,25 @@ all obligations are reviewed. BlastEm is optional and likewise treated as an
 external local test dependency.
 
 The `test_roms/` collection and all input `.gb`/`.gbc` files are local fixtures
-and are ignored by the repository safety rules. The 106 focused unit tests use
+and are ignored by the repository safety rules. The 114 focused unit tests use
 synthetic data and do not require commercial ROMs. Compatibility-suite runs
 require the user to supply the relevant test ROMs separately.
 
-Four additional native integration tests use original diagnostic ROMs generated
-from test source: controller rows, static dispatch discovery, and compact
-scheduler interrupt/mapper paths, and missing dispatch slots/pages/banks. Enable
-them with `GB2MD_NATIVE_TESTS=1`, `GB2MD_BLASTEM=/path/to/blastem` and
+Five additional native integration methods use original diagnostic ROMs
+generated from test source: controller rows, static dispatch discovery, compact
+scheduler interrupt/mapper paths, missing dispatch slots/pages/banks, and
+far-call bank restoration. Enable them with `GB2MD_NATIVE_TESTS=1`, `GB2MD_BLASTEM=/path/to/blastem` and
 `GB2MD_VASM=/path/to/vasmm68k_mot` when running the unit suite. They open BlastEm
 windows and check result memory plus missing-block diagnostics.
 
 Static coverage now includes bounded bank/address tables, bank shadow stores,
 verified bank-setter helpers, and consecutive calls through proven
-bank-preserving leaf routines. These improve coverage but do not guarantee
-that every computed jump is discovered. Cold native scheduler stubs share code
-to reduce output size. Images exceeding the supported 4 MiB cartridge layout
+bank-preserving leaf routines. Verified B/HL far calls include the callback
+and return trampoline; exact input-bit dispatchers include return/callback
+pairs. Recognized bank/address tables have a 128-entry bound derived from the
+helper arithmetic and report truncation. These improve coverage but do not
+guarantee that every computed jump is discovered. Cold native scheduler stubs
+share code to reduce output size. Images exceeding the supported 4 MiB cartridge layout
 fail compilation before replacing an existing `recompiled.md`.
 
 Dense programs can use a bank/page native dispatch table; small or sparse

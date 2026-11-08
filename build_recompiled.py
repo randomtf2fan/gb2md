@@ -176,9 +176,10 @@ gb_cart_rom:
         "source":str(source),"steps_per_scenario":steps,"auto_steps":auto_steps,"auto_inputs":auto_inputs,
         "trace_steps_executed":trace_report["total_steps_executed"],
         "dynamic_unique_blocks":trace_report["dynamic_unique_blocks"],
+        "banked_pointer_tables":trace_report.get("banked_pointer_tables",[]),
         **{name:trace_report.get(name,0) for name in (
-            "indirect_table_targets","hl_pointer_table_targets","rst_inline_table_targets",
-            "constant_bank_call_targets","banked_pointer_table_targets","bank_context_targets")},
+            "indirect_table_targets","hl_pointer_table_targets","bitmask_dispatch_targets","rst_inline_table_targets",
+            "constant_bank_call_targets","constant_far_call_targets","constant_far_call_returns","banked_pointer_table_targets","bank_context_targets")},
         "trace_stop_reasons":[s["stop_reason"] for s in trace_report["scenarios"]],
         "input_exploration":trace_report["input_exploration"],"input_scripts":list(input_scripts),
         "color_profile":color_profile,"blocks":len(blocks),
