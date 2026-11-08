@@ -40,6 +40,15 @@ Install the optional GUI dependency with
 The resulting Genesis image is `<output folder>/recompiled.md`. The CLI remains
 fully usable and is the stable boundary beneath the GUI.
 
+The GUI starts `build_recompiled.py` from its own directory with the current
+Python interpreter. Keep the project files together, restart the GUI after an
+update, and recompile: existing ROM outputs do not update automatically. When
+switching input ROMs, the suggested destination follows the ROM unless you
+chose a custom destination.
+
+The current GUI/build checks were run on Linux (Manjaro). Windows packaging
+and emulator integration have not been verified in this update.
+
 ## Local dependencies and private inputs
 
 Python 3 is required. The native build expects an external vasm
@@ -52,7 +61,7 @@ all obligations are reviewed. BlastEm is optional and likewise treated as an
 external local test dependency.
 
 The `test_roms/` collection and all input `.gb`/`.gbc` files are local fixtures
-and are ignored by the repository safety rules. The 65 focused unit tests use
+and are ignored by the repository safety rules. The 84 focused unit tests use
 synthetic data and do not require commercial ROMs. Compatibility-suite runs
 require the user to supply the relevant test ROMs separately.
 
@@ -217,7 +226,10 @@ miscompiled. It does not copy the input ROM into output artifacts.
 - Native cartridge RAM supports volatile RAM enable/banking for the currently
   modeled MBC1/MBC3/MBC5 paths. Save-file persistence and MBC3 RTC behavior are
   not implemented.
-- PPU modes, STAT behavior, window rendering, access restrictions, audio,
+- Baseline PPU modes/STAT and full-width tile-aligned windows (WX=7, WY a
+  multiple of 8 below 144) are implemented
+  in the current development runtime and covered by original diagnostics.
+  Precise PPU timing, partial/raster window rendering, access restrictions, audio,
   complete mapper/RTC/persistence behavior, OAM corruption, and some indirect
   control flow are incomplete.
 - Tetris v4 is the strongest gameplay regression. The current Super Mario Land

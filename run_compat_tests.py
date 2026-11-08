@@ -312,7 +312,7 @@ def compile_native(result, path: Path, output_root: Path, steps: int):
 
 def _blastem_values(output: str):
     values = {}
-    for address, size, value in re.findall(r"\[\$ff([0-9a-f]{4})\]\.(b|w):\s*([0-9a-f]+)", output, re.I):
+    for address, size, value in re.findall(r"\[\$ff([0-9a-f]{4})\]\.(b|w|l):\s*([0-9a-f]+)", output, re.I):
         values[f"FF{address.upper()}.{size.lower()}"] = int(value, 16)
     return values
 
@@ -358,7 +358,8 @@ def run_native_blastem(result, source: Path, blastem: Path, frames: int, timeout
         f"frames {frames}\n"
         "p/x [$ff0000].w [$ff0002].w [$ff0008].b [$ff0009].b "
         "[$ff000a].b [$ff000b].b [$ff000c].b [$ff000d].b "
-        "[$ff000e].b [$ff000f].b [$ff0010].w\nquit\n"
+        "[$ff000e].b [$ff000f].b [$ff0010].w "
+        "[$ff0018].l [$ff0038].l [$ff0020].l\nquit\n"
     )
     returncode, output, timed_out = _run_in_pty(
         [str(blastem.resolve()), "-d", str(Path(native["artifact"]).resolve())], commands, timeout
@@ -379,7 +380,11 @@ def run_native_blastem(result, source: Path, blastem: Path, frames: int, timeout
         "frames": frames, "exit_code": returncode,
         "observed_memory": values, "terminal_jr_loop": terminal_loop,
     }
-    if registers == MOONEYE_PASS and terminal_loop:
+    if values.get("FF0018.l")==0xBADB10C0 or values.get("FF0038.l",0)>0:
+        location=f"bank ${bank:04X} PC ${pc:04X}" if bank is not None and pc is not None else "unknown bank/PC"
+        native.update(status="FAIL",category="missing_native_block",
+                      detail=f"Missing native block at {location}; increase trace/discovery coverage")
+    elif registers == MOONEYE_PASS and terminal_loop:
         native.update(status="PASS", category="protocol", detail="BlastEm observed Fibonacci registers in the terminal JR loop")
     elif registers == MOONEYE_FAIL and terminal_loop:
         native.update(status="FAIL", category="protocol", detail="BlastEm observed the $42 failure signature")

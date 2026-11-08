@@ -276,12 +276,19 @@ palette, and map-only refreshes therefore avoid converting and uploading all
 640 Genesis patterns. Plane A's transparent outside area is initialized once.
 
 The renderer supports backgrounds, scroll, DMG palettes, and basic 8x8/8x16
-sprites with flips and behind-background priority. The Game Boy window layer,
+sprites with flips and behind-background priority. A full-screen Game Boy
+window (WX=7/WY=0) selects the window map without BG scroll. Full-width
+windows starting on a tile row (WX=7, WY=8..136 in steps of 8) use the Genesis
+window plane at D000-DFFF; Plane A occupies C000-CFFF, Plane B E000-EFFF,
+and the sprite table F000. The Genesis vertical window boundary is positioned
+at viewport row 5 plus WY/8, so window tiles ignore SCX/SCY while the background
+above still scrolls. Original native diagnostics verify the two map planes.
+Other partial windows,
 accurate PPU modes, per-scanline effects, access restrictions, and strict
 viewport sprite clipping remain incomplete. These gaps can be visually
-significant even when CPU execution continues. Pattern dirtiness is still
-coarse: any pattern-byte change uploads all patterns rather than only the
-affected tile.
+significant even when CPU execution continues. The private experimental
+renderer now tracks individual dirty pattern tiles and updates their sprite
+copies; broader visual/gameplay validation is still pending.
 
 `gb_read_joypad` converts the Genesis pad’s active-low signals into the selected
 Game Boy JOYP row. Genesis B/C map to Game Boy A/B and Genesis A/Start map to
@@ -325,11 +332,28 @@ A ROM drawing a recognizable image or reaching a loop is not automatically a
 PASS. Screenshot suites, native Blargg serial observation, and broad native
 differential testing remain unfinished.
 
+## Polling and bank safety update (2026-11-08)
+
+The compiler only marks known WRAM/HRAM flags or exact LY-equality waits for
+skipping. Hardware, unknown-address and incrementing-memory predicates run
+normally. New flag loops call `gb_idle_flag_wait`; legacy `gb_idle_wait`
+flushes timing without skipping. `is_inline_rst_dispatch()` recognizes two
+exact stack-consuming table dispatch forms through bounded fixed-ROM JP
+trampolines. Immediate banked tail jumps can use observed RST caller mappings;
+other bank dataflow remains unresolved. Trace reports separate banked thunk
+targets from dynamically discovered blocks.
+
+`gb_normalize_bank` derives execution identity from PC and the selected mapper
+bank. Mapper stores force a charged boundary/resynchronization. A unique
+observed address is never sufficient for a fixed-ROM caller to bypass bank
+dispatch. Missing code remains a diagnostic rather than executing another
+bank's bytes. MBC5 bank zero is a valid upper-window identity.
+
 ## Current capability boundary
 
 Working and verified at the time of writing:
 
-- All 65 focused unit/smoke tests pass.
+- All 84 focused unit/smoke tests pass.
 - Eleven individual Blargg CPU tests pass in the Python oracle.
 - Thirteen Mooneye timer tests and `bits/reg_f` pass in Python and verified
   native Genesis execution.
@@ -347,15 +371,27 @@ Incomplete or unresolved:
   current bottleneck. Pause, B-Type, audio, and exact top clipping remain
   unverified.
 - Trace/static closure cannot yet prove or discover all computed targets.
-- Full DMA bus arbitration/corruption, PPU timing/modes/STAT/window/clipping,
+- Full DMA bus arbitration/corruption, precise PPU timing/window/clipping,
   audio, complete mapper RTC/save persistence, and native Blargg serial
   observation are missing.
 - Super Mario Land's HALT-loop slowdown is fixed and its last known `F2`
   instructions lower natively. World 1-1 now renders, advances its timer, and
   responds to sustained Right movement; jump and collision/death paths have
   also executed without missing blocks. Longer gameplay and exact pacing still
-  need verification. Pokémon Red and the tested Bad Apple demo currently
-  render black in their native builds.
+  need verification. Pokémon Red has a user-reported title boot with severe
+  slowdown and incorrect graphics. Bad Apple's first interrupt wait was
+  missing STAT generation; see `COMPATIBILITY.md` for measured progress.
+
+`Memory._update_stat()` and native `gb_stat_sync` now model baseline PPU modes
+(80-dot OAM, fixed 172-dot transfer, remaining HBlank, and VBlank), coincidence,
+and a rising edge on the combined enabled STAT sources. Native `gb_tick`
+visits mode boundaries even in larger batches. `gb_halt_wait` stops at the
+next mode boundary when STAT is enabled and the timer is inactive; timer-active
+STAT waits retain the conservative path. This is not a pixel FIFO: variable
+transfer length, LCD start/stop phase, line-153 details, STAT-write glitches,
+and accurate access restrictions remain incomplete. Native mode-register
+reads still inherit scheduler batching granularity. `stat_diagnostic_rom()`
+in `tests/test_smoke.py` is an original interrupt/HALT regression fixture.
 
 The design rule for all fixes is to reproduce the smallest general hardware or
 compiler error, repair the shared implementation, and add a regression. Game

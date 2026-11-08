@@ -1,7 +1,241 @@
 import json, pathlib, subprocess, sys, tempfile, unittest
 
 ROOT = pathlib.Path(__file__).parents[1]
+
+def stat_diagnostic_rom():
+    """Original HBlank IRQ/HALT diagnostic; no third-party ROM data."""
+    rom=bytearray(0x8000)
+    rom[0x48:0x4E]=bytes.fromhex('3e77ea01c0d9')
+    program=bytes.fromhex('f33e80e0403e08e041af e00f3e02eaffff fb00763e42ea00c018fe')
+    rom[0x100:0x100+len(program)]=program
+    return bytes(rom)
+
+def window_diagnostic_rom(wy=0):
+    """Original full-window test: BG tile 0, window tile 1, nonzero scroll."""
+    rom=bytearray(0x8000)
+    program=bytes.fromhex('f3afe0403e01ea009c3effea1080afea1180')+bytes([0x3E,wy,0xE0,0x4A])+bytes.fromhex('3e07e04b3e05e042e0433ee4e0473ef1e04018fe')
+    rom[0x100:0x100+len(program)]=program
+    return bytes(rom)
+
+def stat_poll_diagnostic_rom():
+    """Original mode-zero polling test with VBlank enabled and IME set."""
+    rom=bytearray(0x8000);rom[0x40]=0xD9
+    program=bytes.fromhex('f331feff3e80e0403e01eafffffb00f041e60320fa3e42ea00c018fe')
+    rom[0x100:0x100+len(program)]=program
+    return bytes(rom)
+
+def memory_scan_diagnostic_rom():
+    """A short ROM scan must finish before the first VBlank interrupt."""
+    rom=bytearray(0x8000)
+    handler=bytes.fromhex('f5fa01c03cea01c0f1d9');rom[0x40:0x40+len(handler)]=handler
+    program=bytes.fromhex('f331feff3e80e0403e01eafffffb002100202afe5020fbf33e42ea00c018fe')
+    rom[0x100:0x100+len(program)]=program;rom[0x2000:0x2010]=bytes([1]*15+[0x50])
+    return bytes(rom)
+
+def rst_dispatch_diagnostic_rom():
+    """Original trampoline/16-bit-index dispatch test with two inline targets."""
+    rom=bytearray([0xFF])*0x8000;rom[0x147:0x14A]=bytes(3)
+    rom[:3]=bytes([0xC3,0x30,0x01])
+    rom[0x130:0x13F]=bytes.fromhex('5f1600cb23cb12e1195e2356d5e1e9')
+    rom[0x100:0x109]=bytes.fromhex('3e01c740015001ffff')
+    rom[0x140:0x142]=bytes([0x18,0xFE])
+    rom[0x150:0x157]=bytes.fromhex('3e42ea00c018fe')
+    return bytes(rom)
+
+def bank_switch_diagnostic_rom(mapper=1,bank=2):
+    """A mapper store changes the very next upper-window instruction."""
+    rom=bytearray(0x10000);rom[0x147:0x14A]=bytes([mapper,1,0])
+    rom[0x100:0x103]=bytes.fromhex('c30040')
+    rom[0x4000:0x4005]=bytes([0x3E,bank,0xEA,0,0x20])
+    rom[0x4005:0x400C]=bytes.fromhex('3e11ea00c018fe')
+    offset=bank*0x4000+5
+    rom[offset:offset+7]=bytes.fromhex('3e42ea00c018fe')
+    return bytes(rom)
+
+def banked_rst_dispatch_diagnostic_rom():
+    """RST table entries tail-jump into the observed caller ROM bank."""
+    rom=bytearray(rst_dispatch_diagnostic_rom());rom.extend(bytes([0xFF])*0x8000)
+    rom[0x147:0x14A]=bytes([1,1,0])
+    rom[0x140:0x143]=bytes.fromhex('c30040')
+    rom[0x150:0x153]=bytes.fromhex('c30041')
+    rom[0x4000:0x4002]=bytes([0x18,0xFE])
+    rom[0x4100:0x4107]=bytes.fromhex('3e42ea00c018fe')
+    return bytes(rom)
+
 class SmokeTest(unittest.TestCase):
+    def test_rst_thunks_require_proven_caller_mapping(self):
+        import trace_recompiler as trace
+        for steps,expected in ((1,False),(2,True)):
+            with self.subTest(steps=steps),tempfile.TemporaryDirectory() as d:
+                root=pathlib.Path(d);source=root/'banked-dispatch.gb'
+                source.write_bytes(banked_rst_dispatch_diagnostic_rom())
+                blocks=trace.compile_trace(source,root/'out',steps)
+                self.assertEqual((1,0x4100) in {(b['bank'],b['pc']) for b in blocks},expected)
+    def test_mapper_store_changes_next_instruction_bank(self):
+        from gb_cpu import CPU,Memory
+        for mapper,bank in ((1,2),(0x19,0)):
+            m=Memory(bank_switch_diagnostic_rom(mapper,bank));c=CPU(m)
+            for _ in range(20):c.step()
+            self.assertEqual(m.wram[0],0x42)
+            self.assertEqual(m.rom_bank,bank)
+
+    def test_mbc5_bank_zero_upper_window_static_fallthrough(self):
+        import trace_recompiler as trace
+        with tempfile.TemporaryDirectory() as d:
+            root=pathlib.Path(d);source=root/'bank-zero.gb'
+            source.write_bytes(bank_switch_diagnostic_rom(0x19,0))
+            blocks=trace.compile_trace(source,root/'out',4)
+            self.assertIn((0,0x4007),{(b['bank'],b['pc']) for b in blocks})
+
+    def test_fixed_window_jump_does_not_assume_unique_observed_bank(self):
+        import trace_recompiler as trace
+        rom=bytearray(0x10000);rom[0x147:0x14A]=bytes([1,1,0])
+        rom[0x100:0x103]=bytes.fromhex('c36001')
+        rom[0x160:0x163]=bytes.fromhex('c30040')
+        rom[0x4000:0x4002]=bytes([0x18,0xFE])
+        with tempfile.TemporaryDirectory() as d:
+            root=pathlib.Path(d);source=root/'bank.gb';source.write_bytes(rom)
+            trace.compile_trace(source,root/'out',3)
+            assembly=(root/'out'/'translated_trace.s').read_text()
+            body=assembly.split('L_gb_B000_0160:',1)[1].split('L_gb_B001_4000:',1)[0]
+            self.assertIn('jmp gb_dispatch',body)
+            self.assertNotIn('jmp gb_chain_B001_4000',body)
+            self.assertIn('gb_dispatch_tree:\n\tjsr gb_normalize_bank',assembly)
+    def test_rst_dispatch_trampoline_closes_untraced_target(self):
+        from gb_cpu import CPU,Memory
+        import trace_recompiler as trace
+        rom=rst_dispatch_diagnostic_rom();m=Memory(rom);c=CPU(m)
+        for _ in range(50):c.step()
+        self.assertEqual(m.wram[0],0x42)
+        with tempfile.TemporaryDirectory() as d:
+            root=pathlib.Path(d);source=root/'dispatch.gb';source.write_bytes(rom)
+            blocks=trace.compile_trace(source,root/'out',1)
+            keys={(b['bank'],b['pc']) for b in blocks}
+            self.assertIn((0,0x150),keys)
+            self.assertNotIn((0,0x103),keys)
+            report=json.loads((root/'out'/'trace-profile.json').read_text())
+            self.assertEqual(report['rst_inline_table_targets'],2)
+
+    def test_rst_dispatch_rejects_unknown_banks_cycles_and_near_matches(self):
+        from trace_recompiler import is_inline_rst_dispatch
+        rom=bytearray(rst_dispatch_diagnostic_rom())
+        self.assertTrue(is_inline_rst_dispatch(rom,0))
+        rom[0x136]=0x13
+        self.assertFalse(is_inline_rst_dispatch(rom,0))
+        rom[:3]=bytes([0xC3,0,0])
+        self.assertFalse(is_inline_rst_dispatch(rom,0))
+        rom[:3]=bytes([0xC3,0,0x40])
+        rom[0x4000:0x400F]=bytes.fromhex('5f1600cb23cb12e1195e2356d5e1e9')
+        self.assertFalse(is_inline_rst_dispatch(rom,0))
+    def test_memory_scan_does_not_advance_to_vblank(self):
+        from gb_cpu import CPU,Memory
+        m=Memory(memory_scan_diagnostic_rom());c=CPU(m)
+        for _ in range(500):
+            c.step()
+            if m.wram[0]==0x42:break
+        self.assertEqual(m.wram[:2],bytes([0x42,0]))
+        self.assertLess(m.cycles,144*456)
+
+    def test_stat_poll_exits_in_hblank_without_vblank_skip(self):
+        from gb_cpu import CPU,Memory
+        import trace_recompiler as trace
+        rom=stat_poll_diagnostic_rom();m=Memory(rom);c=CPU(m)
+        for _ in range(500):
+            c.step()
+            if m.wram[0]==0x42:break
+        self.assertEqual(m.wram[0],0x42)
+        with tempfile.TemporaryDirectory() as d:
+            root=pathlib.Path(d);source=root/'stat-poll.gb';source.write_bytes(rom)
+            blocks=trace.compile_trace(source,root/'out',500)
+            self.assertFalse(any(b.get('idle_wait') for b in blocks))
+
+    def test_idle_skip_requires_known_memory_or_exact_ly_equality(self):
+        import trace_recompiler as trace
+        cases=[('f041e60320fa',False),('fa41ffe60320f9',False),
+               ('f044bd20fb',False),('f044bc28fb',False),
+               ('f044fe9030fa',False),('f044fe9028fa',False),
+               ('f044feff20fa',False),('2aa720fc',False),
+               ('f0d1a728fb',True),('fa00c0a728fa',True)]
+        for code,expected in cases:
+            with self.subTest(code=code),tempfile.TemporaryDirectory() as d:
+                root=pathlib.Path(d);rom=bytearray(0x8000);raw=bytes.fromhex(code)
+                rom[0x100:0x100+len(raw)]=raw
+                rom[0x100+len(raw):0x102+len(raw)]=bytes([0x18,0xFE])
+                source=root/'poll.gb';source.write_bytes(rom)
+                blocks=trace.compile_trace(source,root/'out',100)
+                branch=next(b for b in blocks if b['pc']==0x100+len(raw)-2)
+                self.assertEqual(bool(branch.get('idle_wait')),expected)
+
+    def test_full_window_fixture_ignores_background_scroll(self):
+        from gb_cpu import CPU,Memory
+        from gb_render import frame_ppm
+        m=Memory(window_diagnostic_rom());c=CPU(m)
+        for _ in range(100):c.step()
+        self.assertEqual(frame_ppm(m).split(b'\n',3)[3][:3],bytes([136,192,112]))
+
+    def test_partial_window_fixture_starts_at_wy(self):
+        from gb_cpu import CPU,Memory
+        from gb_render import frame_ppm
+        m=Memory(window_diagnostic_rom(128));c=CPU(m)
+        for _ in range(100):c.step()
+        pixels=frame_ppm(m).split(b'\n',3)[3]
+        self.assertEqual(pixels[:3],bytes([224,248,208]))
+        self.assertEqual(pixels[128*160*3:128*160*3+3],bytes([136,192,112]))
+
+    def test_reference_window_origin_map_and_clipping(self):
+        from gb_cpu import Memory
+        from gb_render import frame_ppm
+        m=Memory(bytes(0x8000));m.io[0x40]=0xF1;m.io[0x47]=0xE4
+        m.io[0x4A]=8;m.io[0x4B]=15
+        m.vram[0x1C00]=1
+        m.vram[16:32]=bytes([0xFF,0]*8)
+        pixels=frame_ppm(m).split(b'\n',3)[3]
+        pixel=lambda x,y:pixels[(y*160+x)*3:(y*160+x+1)*3]
+        self.assertEqual(pixel(8,7),bytes([224,248,208]))
+        self.assertEqual(pixel(7,8),bytes([224,248,208]))
+        self.assertEqual(pixel(8,8),bytes([136,192,112]))
+        m.io[0x4B]=167
+        self.assertNotIn(bytes([136,192,112]),frame_ppm(m).split(b'\n',3)[3])
+
+    def test_stat_interrupt_wakes_halt(self):
+        from gb_cpu import CPU,Memory
+        m=Memory(stat_diagnostic_rom());c=CPU(m)
+        for _ in range(500):
+            c.step()
+            if m.wram[0]==0x42:break
+        self.assertEqual(m.wram[:2],bytes([0x42,0x77]))
+
+    def test_input_snapshot_key_retains_stat_edge_latch(self):
+        from gb_cpu import CPU,Memory
+        from trace_recompiler import exploration_state_key
+        c=CPU(Memory(bytes(0x8000)));before=exploration_state_key(c)
+        c.m.stat_line=True
+        self.assertNotEqual(before,exploration_state_key(c))
+
+    def test_stat_hblank_edges_and_combined_line(self):
+        from gb_cpu import Memory
+        m=Memory(bytes(0x8000));m.write(0xFF40,0x80);m.write(0xFF41,8)
+        m.tick(251);self.assertFalse(m.io[15]&2)
+        m.tick(1);self.assertTrue(m.io[15]&2)
+        m.write(0xFF0F,0);m.tick(4);self.assertFalse(m.io[15]&2)
+        m.tick(456);self.assertTrue(m.io[15]&2)
+        # Coincidence and mode sources share one edge-triggered OR line.
+        m=Memory(bytes(0x8000));m.write(0xFF40,0x80);m.write(0xFF41,0x48)
+        m.write(0xFF0F,0);m.tick(252);self.assertFalse(m.io[15]&2)
+        m.write(0xFF45,1)
+        m.write(0xFF0F,0);m.tick(204);self.assertFalse(m.io[15]&2)
+
+    def test_stat_modes_masks_and_lcd_off(self):
+        from gb_cpu import Memory
+        m=Memory(bytes(0x8000));m.write(0xFF40,0x80)
+        self.assertEqual(m.read(0xFF41)&0x87,0x86)
+        m.tick(80);self.assertEqual(m.read(0xFF41)&3,3)
+        m.tick(172);self.assertEqual(m.read(0xFF41)&3,0)
+        m.tick(456*144-252);self.assertEqual(m.read(0xFF41)&3,1)
+        m.write(0xFF41,0xFF);self.assertEqual(m.read(0xFF41)&3,1)
+        m.write(0xFF40,0);m.write(0xFF0F,0);m.tick(70224)
+        self.assertEqual(m.read(0xFF41)&3,0);self.assertFalse(m.io[15]&2)
+
     def test_external_assembler_resolution(self):
         import build_recompiled
         with tempfile.TemporaryDirectory() as d:
@@ -299,8 +533,14 @@ class SmokeTest(unittest.TestCase):
         self.assertIn("tst.b gb_vram_dirty",background)
         self.assertIn("beq.w .render_tilemap",background)
         self.assertIn("tst.b gb_plane_initialized",background)
+        self.assertIn("gb_tile_dirty equ",runtime)
+        self.assertIn(".dirty_tile:",background)
+        self.assertIn(".upload_dirty_tile:",background)
+        self.assertNotIn("move.w #3071,d7",background)
+        self.assertNotIn("move.w #2047,d7                 ; 256 tiles",background)
         vram_write=runtime.split(".vram:",1)[1].split(".wram:",1)[0]
         self.assertIn("cmpi.w #$1800,d1",vram_write)
+        self.assertIn("lea gb_tile_dirty,a0",vram_write)
         self.assertIn(".vram_map_dirty:",vram_write)
         self.assertIn("move.b #1,gb_bg_dirty",vram_write)
 
@@ -530,6 +770,18 @@ class SmokeTest(unittest.TestCase):
             root=pathlib.Path(d);source=root/"ordinary-rst.gb";source.write_bytes(rom)
             blocks=trace.compile_trace(source,root/"out",1)
             self.assertIn((0,0x101),{(b["bank"],b["pc"]) for b in blocks})
+
+    def test_static_closure_rom_only_cross_window_jump(self):
+        import trace_recompiler as trace
+        for mapper in (0, 8, 9, 1):
+            rom=bytearray(0x8000);rom[0x147]=mapper
+            rom[0x100:0x103]=bytes([0xC3,0x00,0x40])
+            rom[0x4000:0x4002]=bytes([0x18,0xFE])
+            with tempfile.TemporaryDirectory() as d:
+                root=pathlib.Path(d);source=root/'cross-window.gb';source.write_bytes(rom)
+                blocks=trace.compile_trace(source,root/'out',1)
+                keys={(b['bank'],b['pc']) for b in blocks}
+                self.assertEqual((1,0x4000) in keys,mapper in (0,8,9))
 
     def test_static_closure_compiles_both_conditional_paths(self):
         import importlib.util

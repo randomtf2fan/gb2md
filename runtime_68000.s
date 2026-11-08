@@ -48,12 +48,16 @@ gb_ram_bank equ $FF0051
 gb_ram_enabled equ $FF0052
 gb_mbc1_mode equ $FF0053
 gb_mbc1_upper equ $FF0054
+gb_stat_line equ $FF0055
+gb_window_full equ $FF0056
+gb_bank_dirty equ $FF0057
 gb_io equ $FF0100
 gb_hram equ $FF0180
 gb_oam equ $FF0200
 gb_vram equ $FF0300
 gb_wram equ $FF2300
 gb_eram equ $FF4300
+gb_tile_dirty equ $FFC300
 
 	xdef gb_dispatch,gb_read8,gb_write8,gb_render_frame
 gb_dispatch:
@@ -74,6 +78,19 @@ gb_missing_block:
 	addq.l #1,gb_missing_count
 .missing_halt:
 	bra.w gb_missing_block
+
+; Logical PC determines execution identity; bank zero is also legal in an
+; MBC5 upper window, so do not infer the window from the old gb_bank value.
+gb_normalize_bank:
+	cmpi.w #$4000,gb_pc
+	blo.s .fixed_window
+	cmpi.w #$8000,gb_pc
+	bhs.s .fixed_window
+	move.w gb_rom_bank,gb_bank
+	rts
+.fixed_window:
+	clr.w gb_bank
+	rts
 
 ; d1.w = logical GB address, returns value in d0.b.
 gb_read8:
@@ -187,6 +204,10 @@ gb_read8:
 	move.b (a0,d1.w),d0
 	rts
 .io_read:
+	cmpi.w #$FF41,d1
+	bne.s .not_stat_status_read
+	bsr.w gb_stat_sync
+.not_stat_status_read:
 	cmpi.w #$FF00,d1
 	bne.s .plain_io_read
 	bsr.w gb_read_joypad
@@ -209,6 +230,10 @@ gb_read8:
 .plain_io_synced:
 	lea gb_io,a0
 	move.b (a0,d1.w),d0
+	cmpi.w #$0041,d1
+	bne.s .not_stat_read
+	ori.b #$80,d0
+.not_stat_read:
 	cmpi.w #$0007,d1
 	bne.s .not_tac_read
 	ori.b #$F8,d0
@@ -256,6 +281,10 @@ gb_write8:
 .done:
 	rts
 .mapper:
+	; The next instruction may be fetched from a newly selected bank, even
+	; on straight-line code. Force a charged boundary before direct chaining.
+	move.b #1,gb_force_tick
+	move.b #1,gb_bank_dirty
 	; MBC1/MBC3 low ROM-bank register. Other mapper controls are expanded in
 	; the same service without changing generated blocks.
 	cmpi.b #$19,gb_mapper_kind
@@ -387,6 +416,10 @@ gb_write8:
 	move.b #1,gb_video_dirty
 	cmpi.w #$1800,d1
 	bhs.s .vram_map_dirty
+	move.w d1,d2
+	lsr.w #4,d2
+	lea gb_tile_dirty,a0
+	move.b #1,(a0,d2.w)
 	move.b #1,gb_vram_dirty
 	bra.s .vram_unchanged
 .vram_map_dirty:
@@ -529,7 +562,26 @@ gb_write8:
 	beq.s .not_tma_write
 	move.b d0,gb_io+$05               ; reload-cycle TMA write also changes TIMA
 .not_tma_write:
+	cmpi.w #$0044,d1
+	beq.w .io_done
+	cmpi.w #$0041,d1
+	bne.s .not_stat_write
+	andi.b #$78,d0
+	move.b d2,-(sp)
+	andi.b #7,d2
+	or.b d2,d0
+	move.b (sp)+,d2
+.not_stat_write:
 	move.b d0,(a0,d1.w)
+	cmpi.w #$0040,d1
+	beq.s .sync_stat_write
+	cmpi.w #$0041,d1
+	beq.s .sync_stat_write
+	cmpi.w #$0045,d1
+	bne.s .stat_write_done
+.sync_stat_write:
+	bsr.w gb_stat_sync
+.stat_write_done:
 	cmpi.w #$000F,d1
 	bne.s .not_if_write
 	andi.b #$1F,(a0,d1.w)
@@ -609,7 +661,16 @@ gb_timer_glitch_increment:
 ; VBlank interrupt is serviced. If VBlank cannot wake the loop, it returns
 ; immediately and ordinary translated polling continues.
 gb_idle_wait:
+	; Legacy traces classified arbitrary hardware polls as VBlank waits.
+	; Keep those artifacts executable, but never skip their observed phases.
+	jsr gb_tick
+	rts
+
+; New traces call this only for known WRAM/HRAM flag polling loops.
+gb_idle_flag_wait:
 	jsr gb_tick                       ; flush the branch and its basic block
+	btst #1,gb_ie
+	bne.w .idle_fallback
 	tst.b gb_ime
 	beq.w .idle_fallback
 	btst #0,gb_ie
@@ -658,6 +719,9 @@ gb_idle_wait:
 gb_halt_wait:
 	tst.b gb_halted
 	beq.w .halt_wait_done
+	; STAT may wake the CPU before VBlank. Stop at the next mode edge.
+	btst #1,gb_ie
+	bne.w .halt_stat_wait
 	btst #0,gb_ie
 	beq.w .halt_wait_done
 	btst #7,gb_io+$40
@@ -765,6 +829,27 @@ gb_halt_wait:
 	bsr.w gb_tick                    ; wake and, when IME is set, enter VBlank
 .halt_wait_done:
 	rts
+.halt_stat_wait:
+	btst #7,gb_io+$40
+	beq.s .halt_wait_done
+	; A timer may wake earlier; keep its conservative path for now.
+	btst #2,gb_io+$07
+	bne.s .halt_wait_done
+	tst.w gb_timer_accum
+	bne.s .halt_wait_done
+	move.w #80,d0
+	cmp.w gb_ly_accum,d0
+	bhi.s .halt_stat_target
+	move.w #252,d0
+	cmp.w gb_ly_accum,d0
+	bhi.s .halt_stat_target
+	move.w #456,d0
+.halt_stat_target:
+	sub.w gb_ly_accum,d0
+	move.w d0,d7
+	clr.b gb_step_cycles
+	bsr.w gb_tick
+	rts
 
 ; d0.b = LY value polled by a read-only loop. This variant is used while IME
 ; is disabled during LCD setup/DMA waits, so no program-visible instructions
@@ -775,6 +860,10 @@ gb_idle_ly:
 	move.w (sp)+,d0
 	cmp.b gb_io+$44,d0
 	beq.w .idle_ly_done_early
+	; STAT-enabled polling cannot skip mode/coincidence transitions.
+	move.b gb_io+$41,d1
+	andi.b #$78,d1
+	bne.w .idle_ly_fallback
 	tst.b gb_ime
 	bne.w .idle_ly_fallback
 	btst #7,gb_io+$40
@@ -830,6 +919,58 @@ gb_add_idle_cycles:
 	add.b d1,gb_io+$04
 	rts
 
+; Baseline fixed mode timing: OAM 80 dots, transfer 172, HBlank 204.
+; Variable mode-3 stalls, LCD startup and DMG STAT-write glitch remain open.
+; Preserve scheduler/write operands; STAT requests on the OR-line rising edge.
+gb_stat_sync:
+	movem.l d0-d3,-(sp)
+	moveq #0,d0
+	btst #7,gb_io+$40
+	beq.s .stat_mode_ready
+	moveq #1,d0
+	cmpi.b #144,gb_io+$44
+	bhs.s .stat_mode_ready
+	moveq #2,d0
+	cmpi.w #80,gb_ly_accum
+	blo.s .stat_mode_ready
+	moveq #3,d0
+	cmpi.w #252,gb_ly_accum
+	blo.s .stat_mode_ready
+	moveq #0,d0
+.stat_mode_ready:
+	moveq #0,d1
+	move.b gb_io+$41,d1
+	andi.b #$78,d1
+	or.b d0,d1
+	move.b gb_io+$44,d2
+	cmp.b gb_io+$45,d2
+	bne.s .stat_no_coincidence
+	ori.b #4,d1
+.stat_no_coincidence:
+	move.b d1,gb_io+$41
+	moveq #0,d3
+	btst #7,gb_io+$40
+	beq.s .stat_line_ready
+	btst #2,d1
+	beq.s .stat_mode_source
+	btst #6,d1
+	bne.s .stat_line_high
+.stat_mode_source:
+	cmpi.b #3,d0
+	beq.s .stat_line_ready
+	addq.w #3,d0
+	btst d0,d1
+	beq.s .stat_line_ready
+.stat_line_high:
+	moveq #1,d3
+	tst.b gb_stat_line
+	bne.s .stat_line_ready
+	bset #1,gb_io+$0F
+.stat_line_ready:
+	move.b d3,gb_stat_line
+	movem.l (sp)+,d0-d3
+	rts
+
 gb_tick:
 	moveq #0,d6
 	move.b gb_step_cycles,d6
@@ -860,6 +1001,21 @@ gb_tick:
 	move.w gb_ly_accum,d0
 	add.w d6,d0
 .scanline_loop:
+	; A batch may cross mode edges within a line without crossing its end.
+	cmpi.w #80,gb_ly_accum
+	bhs.s .stat_after_mode2
+	cmpi.w #80,d0
+	blo.s .stat_after_mode2
+	move.w #80,gb_ly_accum
+	bsr.w gb_stat_sync
+.stat_after_mode2:
+	cmpi.w #252,gb_ly_accum
+	bhs.s .stat_after_mode3
+	cmpi.w #252,d0
+	blo.s .stat_after_mode3
+	move.w #252,gb_ly_accum
+	bsr.w gb_stat_sync
+.stat_after_mode3:
 	cmpi.w #456,d0
 	blo.s .scanlines_done
 	subi.w #456,d0
@@ -868,6 +1024,8 @@ gb_tick:
 	blo.s .ly_in_range
 	clr.b gb_io+$44
 .ly_in_range:
+	clr.w gb_ly_accum
+	bsr.w gb_stat_sync
 	cmpi.b #144,gb_io+$44
 	bne.s .no_scanline
 	bset #0,gb_io+$0F
@@ -878,7 +1036,7 @@ gb_tick:
 	bsr.w gb_render_frame
 	clr.b gb_video_dirty
 .no_scanline:
-	bra.s .scanline_loop
+	bra.w .scanline_loop
 .scanlines_done:
 	move.w d0,gb_ly_accum
 	; Event-driven timer: advance directly to the next four-cycle reload or
@@ -942,6 +1100,11 @@ gb_tick:
 	bne.s .check_irq
 	move.b #1,gb_ime
 .check_irq:
+	tst.b gb_bank_dirty
+	beq.s .bank_identity_ready
+	clr.b gb_bank_dirty
+	bsr.w gb_normalize_bank
+.bank_identity_ready:
 	tst.b gb_defer_irq
 	bne.w .tick_done
 	move.b gb_io+$0F,d0
@@ -1157,11 +1320,50 @@ gb_render_frame:
 	; expensive 640-pattern conversion is only needed after actual VRAM writes.
 	tst.b gb_vram_dirty
 	beq.w .render_tilemap
-	move.l #$40000000,$C00004
+	; Convert only source patterns changed since the previous render. Every
+	; dirty BG tile is uploaded to its native index; tiles 0-255 also update
+	; their transparent sprite copy at Genesis tile IDs 384-639.
+	lea gb_tile_dirty,a2
+	moveq #0,d6
+	move.w #383,d7
+.dirty_tile:
+	tst.b (a2)+
+	beq.s .dirty_tile_next
+	clr.b -1(a2)
+	moveq #0,d5
+	bsr.w .upload_dirty_tile
+	cmpi.w #256,d6
+	bhs.s .dirty_tile_next
+	move.w #384,d5
+	bsr.w .upload_dirty_tile
+.dirty_tile_next:
+	addq.w #1,d6
+	dbf d7,.dirty_tile
+	bra.w .render_tilemap
+
+; Upload source tile d6.w to Genesis tile (d6+d5). d6/d7/a2 are preserved.
+.upload_dirty_tile:
+	move.w d6,d0
+	add.w d5,d0
+	lsl.w #5,d0
+	moveq #0,d1
+	move.w d0,d1
+	move.l d1,d2
+	andi.l #$00003FFF,d2
+	swap d2
+	andi.l #$0000C000,d1
+	lsr.l #8,d1
+	lsr.l #6,d1
+	or.l d1,d2
+	ori.l #$40000000,d2
+	move.l d2,$C00004
+	move.w d6,d0
+	lsl.w #4,d0
 	lea gb_vram,a0
+	adda.w d0,a0
 	lea gb_2bpp_nibble_table,a1
-	move.w #3071,d7                 ; 384 tiles * 8 rows
-.tile_row:
+	moveq #7,d4
+.dirty_tile_row:
 	moveq #0,d0
 	moveq #0,d1
 	move.b (a0)+,d0                 ; low bitplane
@@ -1179,30 +1381,8 @@ gb_render_frame:
 	or.w d0,d1
 	add.w d1,d1
 	move.w (a1,d1.w),$C00000
-	dbf d7,.tile_row
-	; Sprite patterns need GB color 0 to remain transparent. Duplicate the
-	; first 256 tiles unshifted at Genesis tile IDs 384-639.
-	lea gb_vram,a0
-	move.w #2047,d7                 ; 256 tiles * 8 rows
-.sprite_tile_row:
-	moveq #0,d0
-	moveq #0,d1
-	move.b (a0)+,d0
-	move.b (a0)+,d1
-	move.w d1,d2
-	andi.w #$00F0,d2
-	move.w d0,d3
-	lsr.w #4,d3
-	or.w d3,d2
-	add.w d2,d2
-	move.w (a1,d2.w),$C00000
-	andi.w #$000F,d0
-	andi.w #$000F,d1
-	lsl.w #4,d1
-	or.w d0,d1
-	add.w d1,d1
-	move.w (a1,d1.w),$C00000
-	dbf d7,.sprite_tile_row
+	dbf d4,.dirty_tile_row
+	rts
 
 .render_tilemap:
 	; Reset already clears VDP memory. On the first background render, replace
@@ -1217,21 +1397,49 @@ gb_render_frame:
 .clear_plane_a:
 	move.w d0,$C00000
 	dbf d7,.clear_plane_a
+	; Plane A occupies C000-CFFF; the unscrolled Genesis window uses D000-DFFF.
+	move.l #$50000003,$C00004
+	move.w #2047,d7
+.clear_window_plane:
+	move.w d0,$C00000
+	dbf d7,.clear_window_plane
 	move.b #1,gb_plane_initialized
 .plane_initialized:
+	; A full-screen DMG window replaces the BG with unscrolled window data.
+	; Partial windows still require viewport composition/raster support.
+	clr.b gb_window_full
+	btst #5,gb_io+$40
+	beq.s .window_selection_done
+	tst.b gb_io+$4A
+	bne.s .window_selection_done
+	cmpi.b #7,gb_io+$4B
+	bne.s .window_selection_done
+	move.b #1,gb_window_full
+.window_selection_done:
 	; Place the 20x18-tile DMG viewport at (10,5).
 	move.l #$42940003,$C00004       ; Plane A cell (10,5)
 	lea gb_vram+$1800,a2
+	tst.b gb_window_full
+	beq.s .select_bg_map
+	btst #6,gb_io+$40
+	beq.s .map_selected
+	lea gb_vram+$1C00,a2
+	bra.s .map_selected
+.select_bg_map:
 	btst #3,gb_io+$40
 	beq.s .map_selected
 	lea gb_vram+$1C00,a2
 .map_selected:
 	moveq #0,d2
+	moveq #0,d4
+	tst.b gb_window_full
+	bne.s .map_scroll_selected
 	move.b gb_io+$42,d2
 	lsr.w #3,d2
 	moveq #0,d4
 	move.b gb_io+$43,d4
 	lsr.w #3,d4
+.map_scroll_selected:
 	moveq #0,d6
 	moveq #17,d7
 .map_row:
@@ -1262,6 +1470,7 @@ gb_render_frame:
 	dbf d3,.map_pad
 	addq.w #1,d6
 	dbf d7,.map_row
+	bsr.w .render_partial_window
 	; Palette entry 0 stays transparent. Plane A pixels 1-3 use the BGP
 	; mappings for GB colours 1-3; Plane B's solid colour-4 tile supplies the
 	; viewport backing for transparent GB colour 0. This lets a low-priority
@@ -1294,16 +1503,22 @@ gb_render_frame:
 	; Full-screen horizontal scroll table lives at $FC00. Plane A uses -SCX.
 	move.l #$7C000003,$C00004
 	moveq #0,d0
+	tst.b gb_window_full
+	bne.s .window_hscroll_ready
 	move.b gb_io+$43,d0
 	andi.w #7,d0
 	neg.w d0
+.window_hscroll_ready:
 	move.w d0,$C00000
 	move.w #0,$C00000
 	; Plane A vertical scroll uses SCY.
 	move.l #$40000010,$C00004
 	moveq #0,d0
+	tst.b gb_window_full
+	bne.s .window_vscroll_ready
 	move.b gb_io+$42,d0
 	andi.w #7,d0
+.window_vscroll_ready:
 	move.w d0,$C00000
 	move.w #0,$C00000
 .sprite_section:
@@ -1415,6 +1630,71 @@ gb_render_frame:
 	clr.b gb_bg_dirty
 	move.w #$8174,$C00004
 	movem.l (sp)+,d0-d7/a0-a2
+	rts
+
+; Full-width tile-row-aligned DMG windows use the Genesis window plane.
+; It replaces Plane A below the boundary without inheriting SCX/SCY. The
+; transparent cells outside the 160x144 viewport reveal the Plane B shell.
+; Full-screen WY=0 keeps the existing Plane A path; other X/Y alignments
+; still need pixel composition/raster history rather than rounded positions.
+.render_partial_window:
+	move.w #$8334,$C00004
+	move.w #$9100,$C00004
+	move.w #$9200,$C00004
+	btst #0,gb_io+$40
+	beq.w .window_return
+	btst #5,gb_io+$40
+	beq.w .window_return
+	cmpi.b #7,gb_io+$4B
+	bne.w .window_return
+	moveq #0,d2
+	move.b gb_io+$4A,d2
+	beq.w .window_return
+	cmpi.w #144,d2
+	bhs.w .window_return
+	move.w d2,d0
+	andi.w #7,d0
+	bne.w .window_return
+	lsr.w #3,d2
+	move.w #$9285,d0              ; below viewport origin row 5 plus WY/8
+	add.w d2,d0
+	move.w d0,$C00004
+	moveq #0,d0
+	move.w d2,d0
+	lsl.w #7,d0
+	addi.w #$D294,d0              ; window cell (10,5+WY/8)
+	andi.w #$3FFF,d0
+	swap d0
+	ori.l #$40000003,d0
+	move.l d0,$C00004
+	lea gb_vram+$1800,a1
+	btst #6,gb_io+$40
+	beq.s .window_map_ready
+	lea gb_vram+$1C00,a1
+.window_map_ready:
+	move.w #17,d7
+	sub.w d2,d7
+.window_row:
+	moveq #19,d3
+.window_col:
+	moveq #0,d0
+	move.b (a1)+,d0
+	btst #4,gb_io+$40
+	bne.s .window_tile_ready
+	tst.b d0
+	bmi.s .window_tile_ready
+	addi.w #256,d0
+.window_tile_ready:
+	ori.w #$8000,d0
+	move.w d0,$C00000
+	dbf d3,.window_col
+	adda.w #12,a1
+	moveq #43,d3
+.window_pad:
+	move.w #640,$C00000
+	dbf d3,.window_pad
+	dbf d7,.window_row
+.window_return:
 	rts
 .dmg_shades:
 	dc.w gb_shade0,gb_shade1,gb_shade2,gb_shade3

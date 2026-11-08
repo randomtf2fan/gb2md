@@ -12,6 +12,26 @@ def make_rom(path: Path) -> Path:
 
 
 class GuiHelpersTest(unittest.TestCase):
+    def test_rom_change_updates_default_but_preserves_custom_output(self):
+        from unittest.mock import patch
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt5.QtWidgets import QApplication
+        from gb2md_gui import ConverterWindow
+        app=QApplication.instance() or QApplication([])
+        window=ConverterWindow()
+        try:
+            window.rom_edit.setText('/tmp/first.gb')
+            window.output_edit.setText(str(suggested_output(Path('/tmp/first.gb'))))
+            with patch('gb2md_gui.QFileDialog.getOpenFileName',return_value=('/tmp/second.gb','')):
+                window.choose_rom()
+            self.assertEqual(window.output_edit.text(),str(suggested_output(Path('/tmp/second.gb'))))
+            window.output_edit.setText('/tmp/custom-build')
+            with patch('gb2md_gui.QFileDialog.getOpenFileName',return_value=('/tmp/third.gb','')):
+                window.choose_rom()
+            self.assertEqual(window.output_edit.text(),'/tmp/custom-build')
+        finally:
+            window.close()
+
     def test_auto_input_exploration_defaults_to_verified_settings(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from PyQt5.QtWidgets import QApplication

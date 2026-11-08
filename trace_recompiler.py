@@ -44,8 +44,22 @@ def exploration_state_key(cpu):
                               memory.mbc1_mode,memory.cycles%70224))
     digest.update(struct.pack(">3I",memory.div_counter,memory.timer_reload_delay,
                               memory.timer_reloaded_this_cycle))
+    digest.update(bytes([memory.stat_line]))
     for region in (memory.vram,memory.wram,memory.oam,memory.hram,memory.io,memory.eram):digest.update(region)
     return digest.digest()
+
+def is_inline_rst_dispatch(rom, vector):
+    """Recognize exact stack-consuming table dispatchers in fixed ROM only."""
+    signatures=(bytes.fromhex('87e15f1600195e2356d5e1e9'),
+                bytes.fromhex('5f1600cb23cb12e1195e2356d5e1e9'))
+    address=vector;visited=set()
+    for _ in range(4):
+        if address in visited or not 0<=address<0x4000:return False
+        visited.add(address)
+        if any(address+len(s)<=min(len(rom),0x4000) and rom[address:address+len(s)]==s for s in signatures):return True
+        if address+3>min(len(rom),0x4000) or rom[address]!=0xC3:return False
+        address=rom[address+1]|rom[address+2]<<8
+    return False
 
 def parse_input_script(spec: str):
     """Parse controller pulses and optional generic trace-memory events.
@@ -268,7 +282,7 @@ def native_body(block):
             body += [f"move.w #${target:04X},gb_pc"]
             if "idle_ly_target" in block:
                 body += [f"move.w #{block['idle_ly_target']},d0","jsr gb_idle_ly"]
-            else:body += ["jsr gb_idle_wait"]
+            else:body += ["jsr gb_idle_flag_wait"]
             body += ["jmp gb_dispatch_tree"]
             return body
         nextpc=target
@@ -324,6 +338,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
     if auto_inputs and min(input_max_branches,input_max_depth,input_branch_steps,input_max_steps,input_hold_frames,input_snapshot_interval_frames,input_max_snapshots,input_bridge_states_per_depth)<=0:
         raise ValueError("invalid automatic-input safety limits")
     rom=rom_path.read_bytes();hits=collections.Counter();first={};observed=collections.defaultdict(collections.Counter);scenario_reports=[];dynamic_values=collections.defaultdict(set)
+    observed_banks=collections.defaultdict(set)
     input_candidates=[];candidate_keys=set();candidate_last_frame={}
     def capture_input_state(cpu,memory,origin,target,depth=0,limit=None,interval=None):
         if not auto_inputs or not reads_joypad(cpu,memory):return
@@ -340,6 +355,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
         # also invents instructions during HALT or interrupt dispatch.
         if cpu.last_instruction is None:return
         pc=cpu.last_pc;bank=cpu.last_bank;key=(bank,pc);raw=cpu.last_instruction;hits[key]+=1
+        observed_banks[key].add(memory.rom_bank)
         observed[key][raw]+=1
         if key not in scenario_keys:
             first.setdefault(key,raw);scenario_keys.add(key)
@@ -426,10 +442,14 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
     # wall corrections, and similar input-dependent branches do not require an
     # exact frame script merely to avoid gb_missing_block.
     frontier=collections.deque(key for key in first if key[1] < 0x8000)
-    expanded=set();indirect_table_targets=set();hl_table_targets=set();rst_table_targets=set()
+    expanded=set();indirect_table_targets=set();hl_table_targets=set();rst_table_targets=set();banked_thunk_targets=set()
     def rom_key(source_key,address):
         address &= 0xFFFF;source_bank,source_pc=source_key
         if address < 0x4000:return (0,address)
+        # ROM-only cartridges have a fixed upper window even when the
+        # branch originates in the lower window. No bank-state inference
+        # is needed (or safe to assume for banked cartridges).
+        if address < 0x8000 and rom[0x147] in (0x00,0x08,0x09):return (1,address)
         if address < 0x8000 and 0x4000 <= source_pc < 0x8000:return (source_bank,address)
         if 0xFF80 <= address < 0xFFFF:return (0,address)
         return None
@@ -437,7 +457,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
         if key is None or key in first:return
         bank,pc=key
         if pc < 0x4000:offset=pc;limit=0x4000
-        elif pc < 0x8000 and bank:offset=bank*0x4000+pc-0x4000;limit=0x8000
+        elif pc < 0x8000 and (bank or 0x19<=rom[0x147]<=0x1E):offset=bank*0x4000+pc-0x4000;limit=0x8000
         elif 0xFF80 <= pc < 0xFFFF:
             values=dynamic_values.get(pc)
             if not values or len(values)!=1 or next(iter(values)) in (0x00,0xFF):return
@@ -471,7 +491,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
             address=(table+index*2)&0xFFFF
             if address+1>=0x8000:break
             if address<0x4000:entry_offset=address
-            elif source_bank:entry_offset=source_bank*0x4000+address-0x4000
+            elif source_bank or (0x4000<=source_key[1]<0x8000 and 0x19<=rom[0x147]<=0x1E):entry_offset=source_bank*0x4000+address-0x4000
             else:break
             if entry_offset+1>=len(rom):break
             target=rom[entry_offset]|rom[entry_offset+1]<<8;target_key=rom_key(source_key,target)
@@ -510,12 +530,24 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
             # In that convention the bytes after RST are data, not executable
             # fallthrough. Require the exact handler and at least two bounded,
             # valid pointers before suppressing ordinary RST fallthrough.
-            handler=rom[vector:vector+12]
-            rst_candidates=bounded_pointer_table(key,fall) if handler==bytes.fromhex("87e15f1600195e2356d5e1e9") else []
+            rst_candidates=bounded_pointer_table(key,fall) if is_inline_rst_dispatch(rom,vector) else []
             if len(rst_candidates)>=2:
                 successors=[vector]
                 for target_key in rst_candidates:
                     rst_table_targets.add(target_key);indirect_table_targets.add(target_key);add_rom_block(target_key)
+                    # The exact dispatcher preserves the ROM mapping. A fixed
+                    # table target that immediately JP's to the upper window
+                    # also preserves it. Use observed caller mappings (or the
+                    # caller's upper-window identity), never a unique-address
+                    # guess. Other fixed-ROM paths need fuller bank dataflow.
+                    target_pc=target_key[1]
+                    if target_pc+3<=min(len(rom),0x4000) and rom[target_pc]==0xC3:
+                        destination=rom[target_pc+1]|rom[target_pc+2]<<8
+                        contexts=observed_banks.get(key,set()) or ({bank} if 0x4000<=pc<0x8000 else set())
+                        if 0x4000<=destination<0x8000:
+                            for active_bank in contexts:
+                                thunk=(active_bank,destination);add_rom_block(thunk)
+                                if thunk in first:banked_thunk_targets.add(thunk)
             else:successors=[fall,vector]
         elif fam in ("RET_CC",):successors=[fall]
         elif fam not in ("RET","RETI","JP_HL","HALT","STOP","INVALID","UNCLASSIFIED"):
@@ -561,7 +593,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
             if item is None:break
             loop.append(item);cursor += len(bytes.fromhex(item["bytes"]))
         if cursor!=block["pc"] or not loop:continue
-        safe=True;has_read=False
+        safe=True;has_read=False;read_addresses=[]
         for item in loop:
             fam=item["family"]
             if fam=="LD_R_R":
@@ -572,14 +604,26 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
                 has_read |= (item["operand"]&7)==6
             else:safe &= fam in harmless
             has_read |= fam in ("LDH_A_A8","LD_A_A16","LDH_A_C","LD_A_RR")
+            if fam=="LDH_A_A8":read_addresses.append(0xFF00|(item["operand"]&255))
+            elif fam=="LD_A_A16":read_addresses.append(item["operand"])
+            elif (fam in ("LDH_A_C","LD_A_RR")
+                  or fam=="LD_R_R" and (item["opcode"]&7)==6
+                  or fam=="CB" and (item["operand"]&7)==6):
+                # Unknown addresses may be hardware registers. LD A,(HL+/-)
+                # additionally changes HL on each iteration and is not idle.
+                safe=False
         if safe and has_read:
-            block["idle_wait"]=True
-            ly_reads=[item for item in loop if item["family"]=="LDH_A_A8" and item["operand"]==0x44]
-            compares=[item for item in loop if item["family"]=="CP_A_D8"]
-            if ly_reads and compares:block["idle_ly_target"]=compares[-1]["operand"]&255
+            # Only an exact LY equality wait may jump to a chosen scanline.
+            # Inequalities/leave-this-line loops must observe intermediate LY.
+            if (len(loop)==2 and loop[0]["family"]=="LDH_A_A8" and loop[0]["operand"]==0x44
+                and loop[1]["family"]=="CP_A_D8" and loop[1]["operand"]<154 and block["opcode"]==0x20):
+                block["idle_wait"]=True
+                block["idle_ly_target"]=loop[1]["operand"]
+            elif read_addresses and all(0xC000<=a<0xFE00 or 0xFF80<=a<0xFFFF for a in read_addresses):
+                block["idle_wait"]=True
     for block in blocks:block["native_lowered"]=native_body(block) is not None
     out.mkdir(parents=True,exist_ok=True)
-    (out/"trace-profile.json").write_text(json.dumps({"input":str(rom_path),"steps_per_scenario":steps,"auto_steps":auto_steps,"auto_inputs":auto_inputs,"total_steps_executed":sum(s["steps_executed"] for s in scenario_reports),"dynamic_unique_blocks":dynamic_unique_block_count,"indirect_table_targets":len(indirect_table_targets),"hl_pointer_table_targets":len(hl_table_targets),"rst_inline_table_targets":len(rst_table_targets),"total_blocks_after_static_closure":len(blocks),"input_exploration":exploration_report,"scenarios":scenario_reports,"blocks":blocks},indent=2)+"\n")
+    (out/"trace-profile.json").write_text(json.dumps({"input":str(rom_path),"steps_per_scenario":steps,"auto_steps":auto_steps,"auto_inputs":auto_inputs,"total_steps_executed":sum(s["steps_executed"] for s in scenario_reports),"dynamic_unique_blocks":dynamic_unique_block_count,"indirect_table_targets":len(indirect_table_targets),"hl_pointer_table_targets":len(hl_table_targets),"rst_inline_table_targets":len(rst_table_targets),"banked_thunk_targets":len(banked_thunk_targets),"total_blocks_after_static_closure":len(blocks),"input_exploration":exploration_report,"scenarios":scenario_reports,"blocks":blocks},indent=2)+"\n")
     used=sorted({b["family"] for b in blocks if not b["native_lowered"]})
     label=lambda b:f"L_gb_B{b['bank']:03X}_{b['pc']:04X}"
     block_by_key={(b["bank"],b["pc"]):b for b in blocks}
@@ -597,10 +641,9 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
             target_key=None
             if current_target is not None:
                 if not 0x4000<=current_target<0x8000:target_key=(0,current_target)
-                elif block["bank"]:target_key=(block["bank"],current_target)
-                else:
-                    candidates=[key for key in block_by_key if key[1]==current_target]
-                    if len(candidates)==1:target_key=candidates[0]
+                elif 0x4000<=block["pc"]<0x8000:target_key=(block["bank"],current_target)
+                # Fixed-ROM callers have no proven active cartridge bank.
+                # One observed target is coverage, not a bank invariant.
             if statement=="jmp gb_dispatch" and target_key in block_by_key and block["family"] not in ("HALT","STOP"):
                 # The edge stub writes PC only when it actually flushes the
                 # scheduler. Straight-line code does not otherwise observe PC,
@@ -656,7 +699,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
         lines += [f"gb_chain_{stem}:","\ttst.b gb_force_tick",f"\tbne.s .chain_flush_{stem}","\ttst.b gb_ei_delay",f"\tbne.s .chain_flush_{stem}","\tmoveq #0,d0","\tmove.b gb_step_cycles,d0","\tmoveq #0,d1","\tmove.w d7,d1","\tadd.w d0,d1",f"\tcmpi.w #{SCHEDULER_BATCH_T_CYCLES},d1",f"\tbhs.s .chain_flush_{stem}","\tmove.w d1,d7",f"\tjmp {label(block_by_key[(bank,target)])}",f".chain_flush_{stem}:","\tclr.b gb_force_tick",f"\tmove.w #${target:04X},gb_pc","\tjsr gb_tick","\ttst.b gb_halted",f"\tbeq.s .chain_awake_{stem}","\tjmp gb_dispatch",f".chain_awake_{stem}:",f"\tcmpi.w #${bank:04X},gb_bank",f"\tbeq.s .chain_bank_ok_{stem}","\tjmp gb_dispatch_tree",f".chain_bank_ok_{stem}:",f"\tcmpi.w #${target:04X},gb_pc",f"\tbeq.s .chain_pc_ok_{stem}","\tjmp gb_dispatch_tree",f".chain_pc_ok_{stem}:",f"\tjmp {label(block_by_key[(bank,target)])}",""]
     # Balanced native decision tree: about log2(N) comparisons rather than a
     # linear scan through every compiled block on every GB instruction.
-    lines += ["gb_dispatch_tree:","\tmoveq #0,d0","\tmove.w gb_bank,d0","\tswap d0","\tmove.w gb_pc,d0","\tjmp .dispatch_node_0"]
+    lines += ["gb_dispatch_tree:","\tjsr gb_normalize_bank","\tmoveq #0,d0","\tmove.w gb_bank,d0","\tswap d0","\tmove.w gb_pc,d0","\tjmp .dispatch_node_0"]
     ordered=sorted(blocks,key=lambda b:(b["bank"]<<16)|b["pc"])
     def tree(lo,hi,node):
         if lo>=hi:return [f".dispatch_node_{node}:","\tjmp gb_missing_block"]

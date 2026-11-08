@@ -5,8 +5,8 @@
 # and filenames are ignored explicitly below.
 
 # User-supplied/cartridge ROMs and locally downloaded compatibility fixtures.
-/*.gb
-/*.gbc
+*.gb
+*.gbc
 /test_roms/
 
 # Generated builds, private working checkpoints, traces, and test results.
@@ -14,6 +14,8 @@
 /local-builds/
 /gui-builds/
 /compat-results/
+/compat-builds/
+/compat-native/
 /checkpoints/
 
 # Locally installed third-party tools. Obtain these from their own upstreams;
@@ -45,6 +47,10 @@
 *.log
 *.ppm
 *.bin
+*.o
+*.elf
+.env
+.env.*
 
 # Python/test/editor caches and local environments.
 __pycache__/

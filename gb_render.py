@@ -7,11 +7,21 @@ def frame_ppm(memory):
     shades = ((224,248,208),(136,192,112),(52,104,86),(8,24,32))
     out = bytearray(b"P6\n160 144\n255\n")
     for y in range(144):
-        py=(y+scy)&255; tile_y=py>>3; row=py&7
         for x in range(160):
-            px=(x+scx)&255; tile_x=px>>3; tile=memory.vram[((0x1C00 if lcdc&8 else 0x1800) + tile_y*32 + tile_x)&0x1FFF]
+            px=(x+scx)&255;py=(y+scy)&255
+            map_base=0x1C00 if lcdc&8 else 0x1800
+            # Window coordinates use WX-7 and WY, independently of SCX/SCY.
+            # This is a frame-state reference, not a scanline/window-counter
+            # model; mid-frame register changes still require raster history.
+            wx,wy=memory.io[0x4B]-7,memory.io[0x4A]
+            if lcdc&0x20 and y>=wy and x>=wx:
+                px=x-wx;py=y-wy;map_base=0x1C00 if lcdc&0x40 else 0x1800
+            tile_y=py>>3;row=py&7;tile_x=px>>3
+            tile=memory.vram[(map_base+tile_y*32+tile_x)&0x1FFF]
             if lcdc&0x10: tile_base=tile*16
             else: tile_base=0x1000 + ((tile if tile < 128 else tile-256) * 16)
             lo=memory.vram[(tile_base+row*2)&0x1FFF]; hi=memory.vram[(tile_base+row*2+1)&0x1FFF]
-            bit=7-(px&7); colour=((hi>>bit)&1)<<1 | ((lo>>bit)&1); out.extend(shades[(bgp>>(colour*2))&3])
+            bit=7-(px&7); colour=((hi>>bit)&1)<<1 | ((lo>>bit)&1)
+            if not lcdc&1:colour=0
+            out.extend(shades[(bgp>>(colour*2))&3])
     return bytes(out)

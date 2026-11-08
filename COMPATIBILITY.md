@@ -1,5 +1,40 @@
 # GB2MD compatibility status
 
+## Development update — 2026-11-08
+
+The current source passes **84/84 focused tests**. The older dated results
+below describe their respective revisions, not a full-suite rerun today.
+
+- Fixed unsafe VBlank skipping for STAT polls, LY inequalities/register
+  comparisons, and incrementing memory scans. Original HBlank-poll and memory
+  scan fixtures pass in Python/native execution without invented interrupts.
+- Added baseline STAT mode/edge handling and full-width tile-aligned windows.
+  Original full/partial-window native probes verify map selection and scroll
+  independence. Precise/raster PPU behavior remains incomplete.
+- Extended bounded RST table discovery through fixed-ROM trampolines and
+  observed-bank tail jumps. Fixed-to-banked calls no longer assume a unique
+  observed address proves the active bank. Mapper writes resynchronize the
+  execution bank before the next instruction. Native original MBC1 switch and
+  banked RST fixtures pass; static MBC5 bank-zero coverage has a regression.
+- Pokémon Red reaches a recognizable title and NEW GAME / OPTION menu in a
+  private runtime rebuild. Further gameplay is unverified.
+- Link's Awakening reaches the ocean intro, title and PLAYER SELECT. A then
+  reaches an uncompiled target at bank $1F, PC $469D. Name entry/gameplay are
+  not verified. No game addresses, names or hashes select compiler behavior.
+- GUI output suggestions now follow a changed ROM while preserving custom
+  destinations. The GUI always launches its sibling compiler with the current
+  Python interpreter; restart the GUI and recompile after updating.
+
+The polling-safe revision passed all 13 Mooneye timers in Python/native
+execution (12 at 600 observation frames, div_write at 2,500 with 1M discovery
+steps). A 200k-discovery div_write artifact timed out and remains a separate
+result. The final bank-hardening changes have targeted native fixtures but
+still need full timer/DMA/Tetris gameplay regression reruns. Native Blargg
+serial verification, audio, save persistence and complete coverage remain open.
+
+No commercial ROMs, compiled commercial outputs, screenshots, traces or
+downloaded test fixtures accompany these reports.
+
 Last measured: 2026-11-07. A PASS means the ROM's documented serial or
 register signature was observed. Booting or drawing an image is not a PASS.
 `Native NOT_RUN` means no Genesis-side success protocol was observed, even if

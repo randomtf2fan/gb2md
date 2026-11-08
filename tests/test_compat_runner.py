@@ -80,6 +80,19 @@ class CompatibilityRunnerTests(unittest.TestCase):
         output="[$ff0002].w: 4ab4\n [$ff000a].b: 3\n [$ff000f].b: 22\n"
         self.assertEqual(runner._blastem_values(output),{"FF0002.w":0x4AB4,"FF000A.b":3,"FF000F.b":0x22})
 
+    def test_native_missing_block_is_not_reported_as_protocol_timeout(self):
+        from unittest.mock import patch
+        runner=load_runner()
+        output='[$ff0000].w: 0\n[$ff0002].w: 175\n[$ff0018].l: badb10c0\n[$ff0038].l: 1\n'
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);source=root/'original.gb';source.write_bytes(bytes(0x8000))
+            result={'protocol':'mooneye_fibonacci','native_genesis':{'build_status':'BUILT','artifact':str(root/'out.md')}}
+            with patch.object(runner,'_run_in_pty',return_value=(0,output,False)):
+                runner.run_native_blastem(result,source,Path('/tmp/blastem'),120,10)
+        self.assertEqual(result['native_genesis']['status'],'FAIL')
+        self.assertEqual(result['native_genesis']['category'],'missing_native_block')
+        self.assertIn('$0175',result['native_genesis']['detail'])
+
     def test_blargg_visual_tests_are_not_claimed_from_booting(self):
         runner = load_runner()
         self.assertEqual(runner.protocol_for(Path("test_roms/blargg/halt_bug.gb")),"manual_visual")

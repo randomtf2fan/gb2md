@@ -213,8 +213,14 @@ class ConverterWindow(QMainWindow):
         )
         if filename:
             rom = Path(filename).resolve()
+            previous_rom = self.rom_edit.text().strip()
+            current_output = self.output_edit.text().strip()
+            follows_default = not current_output or (
+                bool(previous_rom) and Path(current_output).expanduser().resolve()
+                == suggested_output(Path(previous_rom)).resolve()
+            )
             self.rom_edit.setText(str(rom))
-            if not self.output_edit.text().strip():
+            if follows_default:
                 self.output_edit.setText(str(suggested_output(rom)))
 
     def choose_output(self) -> None:

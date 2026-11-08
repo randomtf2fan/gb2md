@@ -86,6 +86,7 @@ class Memory:
         self.mapper = rom[0x147]; self.rom_bank = 1; self.ram_bank = 0; self.ram_enabled = False; self.mbc1_mode = 0
         ram_sizes={0:0,1:0x800,2:0x2000,3:0x8000,4:0x20000,5:0x10000}; self.eram=bytearray(ram_sizes.get(rom[0x149],0))
         self.cycles = 0
+        self.stat_line = False
     def read(self, a):
         a &= 0xFFFF
         if a < 0x4000: return self.rom[a] if a < len(self.rom) else 0xFF
@@ -106,6 +107,7 @@ class Memory:
             if not select&0x20: low &= (self.joypad_state>>4)&0x0F
             return 0xC0|select|low
         if a == 0xFF07:return self.io[0x07]|0xF8
+        if a == 0xFF41:return self.io[0x41]|0x80
         if a == 0xFF0F:return self.io[0x0F]|0xE0
         if 0xFF00 <= a < 0xFF80: return self.io[a-0xFF00]
         if 0xFF80 <= a < 0xFFFF: return self.hram[a-0xFF80]
@@ -147,7 +149,10 @@ class Memory:
                     if self.timer_reload_delay==4:
                         self.timer_reload_delay=0;self.io[0x05]=self.io[0x06];self.io[0x0F]|=4;self.timer_reloaded_this_cycle=True
             elif a == 0xFF0F:self.io[0x0F]=v&0x1F
+            elif a == 0xFF41:self.io[0x41]=(v&0x78)|(self.io[0x41]&7)
+            elif a == 0xFF44:pass
             else:self.io[a-0xFF00] = v
+            if a in (0xFF40,0xFF41,0xFF45):self._update_stat(self.cycles)
             if a == 0xFF46:
                 self.dma_requested = v
         elif 0xFF80 <= a < 0xFFFF: self.hram[a-0xFF80] = v
@@ -214,6 +219,20 @@ class Memory:
         while self.dma_phase >= 4:
             self.dma_phase -= 4
             self._dma_machine_cycle()
+    def _update_stat(self, cycles):
+        """Baseline fixed-length PPU modes; mode 3 stall timing is still open."""
+        ly=(cycles//456)%154;dot=cycles%456
+        mode=1 if ly>=144 else (2 if dot<80 else 3 if dot<252 else 0)
+        enabled=bool(self.io[0x40]&0x80)
+        if not enabled:mode=0
+        equal=ly==self.io[0x45]
+        self.io[0x41]=(self.io[0x41]&0x78)|mode|(4 if equal else 0)
+        line=enabled and bool((equal and self.io[0x41]&0x40) or
+            (mode==0 and self.io[0x41]&8) or (mode==1 and self.io[0x41]&16) or
+            (mode==2 and self.io[0x41]&32))
+        if line and not self.stat_line:self.io[0x0F]|=2
+        self.stat_line=line
+
     def tick(self, n=4):
         old=self.io[0x44]
         self.timer_reloaded_this_cycle=False
@@ -231,7 +250,15 @@ class Memory:
                 old_signal=self._timer_signal();self.div_counter=(self.div_counter+1)&0xFFFF;self.io[0x04]=self.div_counter>>8
                 if old_signal and not self._timer_signal():self._timer_increment()
         self._tick_dma(n)
-        self.cycles += n
+        start=self.cycles;end=start+n
+        # Visit mode/line edges even when the caller advances a large batch.
+        cursor=start
+        while cursor<end:
+            dot=cursor%456
+            boundary=80 if dot<80 else 252 if dot<252 else 456
+            cursor=min(end,cursor+boundary-dot)
+            self._update_stat(cursor)
+        self.cycles = end
         self.io[0x44] = (self.cycles // 456) % 154 # LY approximation for boot-path waits
         if old != 144 and self.io[0x44] == 144: self.io[0x0F] |= 1
 
