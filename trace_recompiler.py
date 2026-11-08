@@ -799,7 +799,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
     emit_native_blocks(blocks,out)
     return blocks
 
-def emit_native_blocks(blocks,out):
+def emit_native_blocks(blocks,out,dispatch_format="auto"):
     """Emit validated block metadata without repeating reference discovery."""
     used=sorted({b["family"] for b in blocks if not b["native_lowered"]})
     label=lambda b:f"L_gb_B{b['bank']:03X}_{b['pc']:04X}"
@@ -896,19 +896,49 @@ def emit_native_blocks(blocks,out):
                   "\trts",".compact_halted:","\taddq.l #8,sp","\tjmp gb_dispatch",
                   ".compact_pc_changed:","\taddq.l #6,sp","\tjmp gb_dispatch_tree",
                   ".compact_bank_changed:","\taddq.l #4,sp","\tjmp gb_dispatch_tree",""]
-    # Balanced native decision tree: about log2(N) comparisons rather than a
-    # linear scan through every compiled block on every GB instruction.
-    lines += ["gb_dispatch_tree:","\tjsr gb_normalize_bank","\tmoveq #0,d0","\tmove.w gb_bank,d0","\tswap d0","\tmove.w gb_pc,d0","\tjmp .dispatch_node_0"]
-    ordered=sorted(blocks,key=lambda b:(b["bank"]<<16)|b["pc"])
-    def tree(lo,hi,node):
-        if lo>=hi:return [f".dispatch_node_{node}:","\tjmp gb_missing_block"]
-        mid=(lo+hi)//2;b=ordered[mid];key=(b["bank"]<<16)|b["pc"];left=node*2+1;right=node*2+2
-        result=[f".dispatch_node_{node}:",f"\tcmpi.l #${key:08X},d0",f"\tbne.s .dispatch_not_equal_{node}",f"\tjmp {label(b)}",f".dispatch_not_equal_{node}:",f"\tbhs.s .dispatch_not_lower_{node}"]
-        result += [f"\tjmp .dispatch_node_{left}" if lo<mid else "\tjmp gb_missing_block"]
-        result += [f".dispatch_not_lower_{node}:"]
-        result += [f"\tjmp .dispatch_node_{right}" if mid+1<hi else "\tjmp gb_missing_block"]
-        return result+tree(lo,mid,left)+tree(mid+1,hi,right)
-    lines += tree(0,len(ordered),0)
+    # Retain the entry symbol used by the runtime, but use bank -> PC page ->
+    # instruction pointer tables. Only populated 256-byte pages need storage.
+    # All holes point to the existing diagnostic, including absent banks.
+    pages={};banks={b['bank'] for b in blocks};max_bank=max(banks)
+    for block in blocks:
+        pages.setdefault((block['bank'],block['pc']>>8),{})[block['pc']&255]=label(block)
+    page_bytes=4*(max_bank+1)+1024*(2+len(banks)+len(pages))
+    if dispatch_format not in ('auto','paged','tree'):raise ValueError('unknown native dispatch format')
+    use_pages=dispatch_format=='paged' or dispatch_format=='auto' and page_bytes+96<24*len(blocks)
+    if use_pages:
+        lines += ["gb_dispatch_tree:","\tjsr gb_normalize_bank","\tmoveq #0,d0",
+              "\tmove.w gb_bank,d0",f"\tcmpi.w #${max_bank:04X},d0","\tbls.s .dispatch_bank_in_range",
+              "\tjmp gb_missing_block",".dispatch_bank_in_range:",
+              "\tlsl.w #2,d0","\tlea gb_dispatch_banks,a0","\tmovea.l (a0,d0.w),a0",
+              "\tmoveq #0,d0","\tmove.w gb_pc,d0","\tlsr.w #8,d0","\tlsl.w #2,d0",
+              "\tmovea.l (a0,d0.w),a0","\tmoveq #0,d0","\tmove.b gb_pc+1,d0",
+              "\tlsl.w #2,d0","\tmovea.l (a0,d0.w),a0","\tjmp (a0)","\teven",
+                  "gb_dispatch_banks:"]
+    def pointers(values):
+        for index in range(0,len(values),8):lines.append("\tdc.l "+",".join(values[index:index+8]))
+    if use_pages:
+        pointers([f'gb_dispatch_bank_{bank:03X}' if bank in banks else 'gb_dispatch_empty_bank'
+                  for bank in range(max_bank+1)])
+        lines += ['gb_dispatch_empty_bank:','\tdcb.l 256,gb_dispatch_empty_page',
+                  'gb_dispatch_empty_page:','\tdcb.l 256,gb_missing_block']
+        for bank in sorted(banks):
+            lines.append(f'gb_dispatch_bank_{bank:03X}:')
+            pointers([f'gb_dispatch_page_{bank:03X}_{page:02X}' if (bank,page) in pages else 'gb_dispatch_empty_page'
+                      for page in range(256)])
+        for (bank,page),entries in sorted(pages.items()):
+            lines.append(f'gb_dispatch_page_{bank:03X}_{page:02X}:')
+            pointers([entries.get(offset,'gb_missing_block') for offset in range(256)])
+    else:
+        # Sparse/tiny programs keep the smaller original decision tree.
+        lines += ["gb_dispatch_tree:","\tjsr gb_normalize_bank","\tmoveq #0,d0","\tmove.w gb_bank,d0","\tswap d0","\tmove.w gb_pc,d0","\tjmp .dispatch_node_0"]
+        ordered=sorted(blocks,key=lambda b:(b['bank']<<16)|b['pc'])
+        def tree(lo,hi,node):
+            if lo>=hi:return [f'.dispatch_node_{node}:','\tjmp gb_missing_block']
+            mid=(lo+hi)//2;b=ordered[mid];key=(b['bank']<<16)|b['pc'];left=node*2+1;right=node*2+2
+            result=[f'.dispatch_node_{node}:',f'\tcmpi.l #${key:08X},d0',f'\tbne.s .dispatch_not_equal_{node}',f'\tjmp {label(b)}',f'.dispatch_not_equal_{node}:',f'\tbhs.s .dispatch_not_lower_{node}']
+            result += [f'\tjmp .dispatch_node_{left}' if lo<mid else '\tjmp gb_missing_block',f'.dispatch_not_lower_{node}:',f'\tjmp .dispatch_node_{right}' if mid+1<hi else '\tjmp gb_missing_block']
+            return result+tree(lo,mid,left)+tree(mid+1,hi,right)
+        lines += tree(0,len(ordered),0)
     lines += ["\teven","gb_compiled_block_table:"]
     for block in blocks: lines += [f"\tdc.w ${block['bank']:04X},${block['pc']:04X}",f"\tdc.l {label(block)}"]
     lines += ["\tdc.w $FFFF,$FFFF","\tdc.l 0"]
@@ -916,7 +946,10 @@ def emit_native_blocks(blocks,out):
     (out/"native-codegen-report.json").write_text(json.dumps({
         "blocks":len(blocks),"chain_targets":len(chain_targets),
         "compact_chain_targets":len(compact_targets),
-        "hot_chain_targets":len(chain_targets)-len(compact_targets)},indent=2)+"\n")
+        "hot_chain_targets":len(chain_targets)-len(compact_targets),
+        "dispatch_format":"bank_page_table" if use_pages else "balanced_tree",
+        "dispatch_pages":len(pages) if use_pages else 0,
+        "dispatch_table_bytes":page_bytes if use_pages else 0},indent=2)+"\n")
     return blocks
 
 def main():

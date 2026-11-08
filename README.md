@@ -88,9 +88,9 @@ and are ignored by the repository safety rules. The 106 focused unit tests use
 synthetic data and do not require commercial ROMs. Compatibility-suite runs
 require the user to supply the relevant test ROMs separately.
 
-Three additional native integration tests use original diagnostic ROMs generated
+Four additional native integration tests use original diagnostic ROMs generated
 from test source: controller rows, static dispatch discovery, and compact
-scheduler interrupt/mapper paths. Enable
+scheduler interrupt/mapper paths, and missing dispatch slots/pages/banks. Enable
 them with `GB2MD_NATIVE_TESTS=1`, `GB2MD_BLASTEM=/path/to/blastem` and
 `GB2MD_VASM=/path/to/vasmm68k_mot` when running the unit suite. They open BlastEm
 windows and check result memory plus missing-block diagnostics.
@@ -101,6 +101,13 @@ bank-preserving leaf routines. These improve coverage but do not guarantee
 that every computed jump is discovered. Cold native scheduler stubs share code
 to reduce output size. Images exceeding the supported 4 MiB cartridge layout
 fail compilation before replacing an existing `recompiled.md`.
+
+Dense programs can use a bank/page native dispatch table; small or sparse
+programs retain the decision tree automatically. An original dispatch-heavy
+benchmark measured 1.216x throughput; actual game speedups remain unmeasured.
+Run `python3 benchmark_dispatch.py --blastem /path/to/blastem` with an external
+assembler configured to reproduce it. Output defaults to ignored
+`compat-builds/dispatch-benchmark/`; no commercial ROM is needed.
 
 Generated `recompiled.md` files are Mega Drive ROM binaries, not Markdown.
 They include source cartridge data needed by runtime banked reads and therefore

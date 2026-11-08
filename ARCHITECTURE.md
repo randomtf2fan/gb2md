@@ -238,6 +238,20 @@ the general dispatcher on every instruction. Returns, indirect jumps, mapper
 changes, interrupts, and uncertain control flow use a balanced `(bank, PC)`
 dispatch tree.
 
+The dispatcher now uses a bank/page pointer lookup when its estimated table
+size plus 96 bytes is smaller than 24 bytes per block; sparse programs retain
+the original tree. Each populated 256-byte PC page holds 256 native pointers.
+Holes share diagnostic pages, and a bank bound check protects the root lookup.
+The entry name remains `gb_dispatch_tree` for runtime ABI compatibility.
+`emit_native_blocks(..., dispatch_format='tree'|'paged'|'auto')` supports
+controlled backend tests; normal compilation uses auto. New codegen-report
+fields identify the chosen format, allocated page count and table size.
+
+`benchmark_dispatch.py` generates an entirely original call/return workload
+with bounded unused entries and compares both formats over equal Genesis frame
+counts. A 24,000-entry run measured 1.21608x simulated-cycle throughput. This
+synthetic result does not establish a game FPS improvement.
+
 Generated blocks publish their Game Boy T-cycle cost in `gb_step_cycles`.
 Straight-line chains accumulate up to `SCHEDULER_BATCH_T_CYCLES` in 68000
 register `d7`, then call `gb_tick` at a scheduling boundary. Timing-sensitive

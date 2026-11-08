@@ -2,6 +2,12 @@ import json, os, pathlib, subprocess, sys, tempfile, unittest
 
 ROOT = pathlib.Path(__file__).parents[1]
 
+def large_dispatch_diagnostic_rom():
+    """Original NOP stream makes the native dispatcher exceed word-branch range."""
+    rom=bytearray(0x8000);rom[0x100:0x103]=bytes.fromhex('c35001')
+    rom[0x950:0x957]=bytes.fromhex('3e42ea00c018fe')
+    return bytes(rom)
+
 def inline_hl_table_diagnostic_rom(preserve_bc=True):
     """Original inline BC-indexed pointer table; optionally preserve BC."""
     rom=bytearray(0x8000)
@@ -320,9 +326,10 @@ class SmokeTest(unittest.TestCase):
             blocks=discover(*args,**kwargs)
             # Exercise the compact edges even for paths the reference ran.
             for block in blocks:block['hits']=0
-            emit_native_blocks(blocks,args[1]);return blocks
+            emit_native_blocks(blocks,args[1],dispatch_format='paged');return blocks
         for name,fixture,expected in (('irq',stat_diagnostic_rom,[0x42,0x77,0]),
-                                      ('mapper',bank_switch_diagnostic_rom,[0x42,0,0])):
+                                      ('mapper',bank_switch_diagnostic_rom,[0x42,0,0]),
+                                      ('mbc5-zero',lambda:bank_switch_diagnostic_rom(0x19,0),[0x42,0,0])):
             with self.subTest(name=name),tempfile.TemporaryDirectory() as d:
                 root=pathlib.Path(d);source=root/'original.gb';source.write_bytes(fixture())
                 with patch.object(compiler,'compile_trace',side_effect=force_compact):
@@ -334,10 +341,36 @@ class SmokeTest(unittest.TestCase):
                 self.assertEqual([values.get(a) for a in ('FF2300.b','FF2301.b','FF0018.l')],expected,output)
 
     @unittest.skipUnless(os.environ.get('GB2MD_NATIVE_TESTS')=='1','opt-in external BlastEm integration')
+    def test_native_dispatch_missing_slots_pages_and_banks(self):
+        import build_recompiled as compiler
+        from trace_recompiler import emit_native_blocks
+        from unittest.mock import patch
+        from run_compat_tests import _run_in_pty,_blastem_values
+        discover=compiler.compile_trace
+        def force_pages(*args,**kwargs):
+            blocks=discover(*args,**kwargs);emit_native_blocks(blocks,args[1],dispatch_format='paged');return blocks
+        cases=(('slot','218001e9',0,0x180),('page','21b6ffe9',0,0xFFB6),
+               ('bank-limit','3e03ea0020210041e9',3,0x4100),
+               ('bank-hole','3e02ea0020cd00413e01ea0020210041e9',1,0x4100))
+        for name,program,bank,pc in cases:
+            with self.subTest(name=name),tempfile.TemporaryDirectory() as d:
+                root=pathlib.Path(d);rom=bytearray(0x10000)
+                rom[0x147:0x14A]=bytes([1,1,0]);rom[0x8100]=0xC9
+                raw=bytes.fromhex(program);rom[0x100:0x100+len(raw)]=raw
+                source=root/'original.gb';source.write_bytes(rom)
+                with patch.object(compiler,'compile_trace',side_effect=force_pages):compiler.build(source,root/'out',2)
+                commands='frames 600\np/x [$ff0000].w [$ff0002].w [$ff0018].l [$ff0038].l\nquit\n'
+                code,output,timed=_run_in_pty([os.environ['GB2MD_BLASTEM'],'-d',str(root/'out'/'recompiled.md')],commands,30)
+                self.assertFalse(timed,output);self.assertEqual(code,0,output)
+                values=_blastem_values(output)
+                self.assertEqual([values.get(a) for a in ('FF0000.w','FF0002.w','FF0018.l','FF0038.l')],
+                                 [bank,pc,0xBADB10C0,1],output)
+
+    @unittest.skipUnless(os.environ.get('GB2MD_NATIVE_TESTS')=='1','opt-in external BlastEm integration')
     def test_native_static_dispatch_discovery(self):
         from build_recompiled import build
         from run_compat_tests import _run_in_pty,_blastem_values
-        for name,fixture in (('hl-table',hl_dispatch_diagnostic_rom),('bank-call',constant_bank_call_diagnostic_rom),('bank-table',banked_table_diagnostic_rom),('bank-context',bank_context_diagnostic_rom),('bank-shadow',bank_shadow_diagnostic_rom),('inline-hl',inline_hl_table_diagnostic_rom)):
+        for name,fixture in (('hl-table',hl_dispatch_diagnostic_rom),('bank-call',constant_bank_call_diagnostic_rom),('bank-table',banked_table_diagnostic_rom),('bank-context',bank_context_diagnostic_rom),('bank-shadow',bank_shadow_diagnostic_rom),('inline-hl',inline_hl_table_diagnostic_rom),('large-static',large_dispatch_diagnostic_rom)):
             with self.subTest(name=name),tempfile.TemporaryDirectory() as d:
                 root=pathlib.Path(d);source=root/'original.gb';source.write_bytes(fixture())
                 build(source,root/'out',2)

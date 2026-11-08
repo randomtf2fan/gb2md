@@ -1,5 +1,22 @@
 # GB2MD compatibility status
 
+## Paged dispatch and naming follow-up — 2026-11-08
+
+**110/110 unit/native tests PASS** (106 ordinary, four opt-in native methods).
+Fresh native backend replay of the preserved timer/reg_f traces passes14/14;
+Python results were carried forward, not rerun. Sparse programs keep their
+tree; dense programs may use bank/page dispatch. Missing slots/pages/banks,
+IRQ/mapper transitions, MBC5 bank zero and a large-program branch-range case
+have native regressions. The original dispatch benchmark measures1.21608x
+throughput, not a game FPS claim.
+
+The unchanged Pokémon dialogue build accepts preset player/rival names and
+reaches final introductory text, then traps at $03:$7113 toward the opening
+room. Custom naming and overworld gameplay remain unverified. The smaller
+paged Pokémon artifact has not been game-playtested. No known-good ROM was
+overwritten. GUI builds use the new dispatcher automatically after updating.
+Testing stopped at user request; older results below describe earlier passes.
+
 ## Banked discovery and code-size milestone — 2026-11-08
 
 **109/109 tests PASS with native integration enabled**: 106 ordinary tests
