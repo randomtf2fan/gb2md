@@ -2,6 +2,28 @@
 
 ## Development update — 2026-11-08
 
+Latest dispatch follow-up: **92 ordinary tests PASS, two opt-in native tests
+PASS (94/94 with native enabled)**. Native integration checks two original
+dispatch fixtures, compiled from two traced instructions, against their WRAM
+result and zero missing-block marker. The compiler now recognizes bounded
+HL-table lookup across forward jumps/BC/DE setup with exact verified helpers,
+and fixed-ROM constant mapper-store + CALL/JP patterns. Unknown upper bank bits
+are enumerated rather than assumed zero. No CPU/runtime changes in this pass.
+Python Mooneye timers plus `reg_f`: **14/14 PASS**; their native results are
+**NOT_RUN in this pass**, separate from historical native timer results below.
+
+Link's Awakening now verifies name entry and in-session file creation. Selecting
+the file first trapped at $14:$5326; the subsequent bank-call discovery build
+passes that target and traps at $14:$523C. Save persistence and gameplay remain
+unverified. Pokémon's NEW GAME selection reproducibly traps at $03:$7850,
+supplied by a banked three-byte function table; general far-call discovery is
+the next coverage investigation. Neither title is claimed playable.
+
+No fresh extended Tetris gameplay regression was run in this pass. Its known
+checkpoints remain unchanged. The GUI invokes its sibling compiler and uses
+these coverage changes without new options; restart and recompile after update.
+The following controller and earlier-runtime counts are historical snapshots.
+
 Controller follow-up: **86 unit tests plus one opt-in native integration test
 PASS**. Both selected JOYP rows now combine by active-low AND. A native tight
 scan records the expected D7/EE/C6 for Start+Right; aggregate tracking finds
@@ -27,12 +49,14 @@ below describe their respective revisions, not a full-suite rerun today.
   observed-bank tail jumps. Fixed-to-banked calls no longer assume a unique
   observed address proves the active bank. Mapper writes resynchronize the
   execution bank before the next instruction. Native original MBC1 switch and
-  banked RST fixtures pass; static MBC5 bank-zero coverage has a regression.
+  banked RST fixtures pass; static MBC5 bank-zero discovery has regression
+  test coverage.
 - Pokémon Red reaches a recognizable title and NEW GAME / OPTION menu in a
   private runtime rebuild. Further gameplay is unverified.
-- Link's Awakening reaches the ocean intro, title and PLAYER SELECT. A then
-  reaches an uncompiled target at bank $1F, PC $469D. Name entry/gameplay are
-  not verified. No game addresses, names or hashes select compiler behavior.
+- Link's Awakening's earlier build reached PLAYER SELECT then trapped at
+  $1F:$469D. The latest dispatch follow-up above supersedes that limitation;
+  gameplay remains unverified. No game addresses, names or hashes select
+  compiler behavior.
 - GUI output suggestions now follow a changed ROM while preserving custom
   destinations. The GUI always launches its sibling compiler with the current
   Python interpreter; restart the GUI and recompile after updating.

@@ -154,6 +154,22 @@ separately as `indirect_table_targets`. This fixed an indirect Tetris piece
 dispatch path, but it is not a general solution for all computed jumps or bank
 tracking. Expanding it requires false-positive and banking regressions.
 
+`hl_dispatch_table()` additionally recognizes a bounded variant with a forward
+`JR` and intervening `LD BC,nn` / `LD DE,nn` setup. It follows at most 12
+instructions within 32 bytes, requires an exact zero- or one-based pointer
+lookup helper, and rejects unknown calls, HL writes, backward jumps and
+ambiguous banked helpers. These discoveries use the same bounded table reader
+and `hl_pointer_table_targets` counter. This covers more dispatch shapes; it
+does not resolve arbitrary computed jumps.
+
+`constant_bank_call_targets()` recognizes fixed-window `LD A,n / LD (mapper),A /
+CALL nn` or `JP nn`. Valid MBC1/MBC3/MBC5 low-bank register writes yield a
+bounded set of physically present target banks. Unwritten MBC1 high bits and
+the MBC5 ninth bit are enumerated rather than assumed zero. Partial high-bit
+writes, other stores and upper-window callers are rejected. Targets are counted
+separately in `constant_bank_call_targets` in trace/build reports. This adds
+coverage only: live native bank dispatch still determines which code executes.
+
 The second recognizes an exact SM83 inline table-call handler reached through
 `RST`: the handler pops the stacked return address, indexes the pointer table
 immediately following the `RST`, and jumps to the selected routine. Once this

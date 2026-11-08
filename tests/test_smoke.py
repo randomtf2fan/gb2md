@@ -2,6 +2,23 @@ import json, os, pathlib, subprocess, sys, tempfile, unittest
 
 ROOT = pathlib.Path(__file__).parents[1]
 
+def constant_bank_call_diagnostic_rom():
+    """Original fixed-window mapper store and untraced banked callback."""
+    rom=bytearray(0x10000);rom[0x147:0x14A]=bytes([1,1,0])
+    rom[0x100:0x10D]=bytes.fromhex('3e02ea0020cd0041ea00c018fe')
+    rom[0x8100:0x8103]=bytes.fromhex('3e42c9')
+    return bytes(rom)
+
+def hl_dispatch_diagnostic_rom():
+    """Original one-based table lookup across a forward jump and BC/DE setup."""
+    rom=bytearray(0x8000)
+    rom[0x100:0x118]=bytes.fromhex('3e02212001180721240100000000cd30011100c00110c0e9')
+    rom[0x120:0x126]=bytes.fromhex('40015001ffff')
+    rom[0x130:0x13D]=bytes.fromhex('3dcb274f0600094e23466069c9')
+    rom[0x140:0x142]=bytes([0x18,0xFE])
+    rom[0x150:0x157]=bytes.fromhex('3e42ea00c018fe')
+    return bytes(rom)
+
 def controller_diagnostic_rom(aggregate=False):
     """Original tight JOYP scan, recording buttons/directions/both rows."""
     rom=bytearray(0x8000)
@@ -78,6 +95,87 @@ def banked_rst_dispatch_diagnostic_rom():
     return bytes(rom)
 
 class SmokeTest(unittest.TestCase):
+    def test_constant_bank_call_closure(self):
+        import trace_recompiler as trace
+        from gb_cpu import CPU,Memory
+        rom=constant_bank_call_diagnostic_rom();m=Memory(rom);c=CPU(m)
+        for _ in range(30):c.step()
+        self.assertEqual(m.wram[0],0x42)
+        with tempfile.TemporaryDirectory() as d:
+            root=pathlib.Path(d);source=root/'bank-call.gb';source.write_bytes(rom)
+            blocks=trace.compile_trace(source,root/'out',2)
+            self.assertIn((2,0x4100),{(b['bank'],b['pc']) for b in blocks})
+            self.assertEqual(json.loads((root/'out'/'trace-profile.json').read_text())['constant_bank_call_targets'],1)
+
+    def test_constant_bank_call_mapper_candidates(self):
+        from trace_recompiler import constant_bank_call_targets
+        rom=bytearray(0x200000);rom[:0x10000]=constant_bank_call_diagnostic_rom()
+        self.assertEqual(constant_bank_call_targets(rom,0x100),[(b,0x4100) for b in (2,34,66,98)])
+        rom[0x101]=0
+        self.assertEqual(constant_bank_call_targets(rom,0x100),[(b,0x4100) for b in (1,33,65,97)])
+        rom[0x147]=0x13
+        self.assertEqual(constant_bank_call_targets(rom,0x100),[(1,0x4100)])
+        rom.extend(bytes(0x600000));rom[0x147]=0x19
+        self.assertEqual(constant_bank_call_targets(rom,0x100),[(0,0x4100),(256,0x4100)])
+
+    def test_constant_bank_call_rejects_ambiguous_stores(self):
+        from trace_recompiler import constant_bank_call_targets
+        original=constant_bank_call_diagnostic_rom()
+        for address,value in ((0x104,0x00),(0x104,0x40),(0x104,0xC0),(0x105,0xC4),(0x107,0x80)):
+            rom=bytearray(original);rom[address]=value
+            self.assertEqual(constant_bank_call_targets(rom,0x100),[])
+        rom=bytearray(original);rom[0x147]=0x19;rom[0x104]=0x30
+        self.assertEqual(constant_bank_call_targets(rom,0x100),[])
+        self.assertEqual(constant_bank_call_targets(original,0x4000),[])
+        self.assertEqual(constant_bank_call_targets(original,0x3FF9),[])
+
+    def test_hl_dispatch_through_jump_and_register_setup(self):
+        import trace_recompiler as trace
+        from gb_cpu import CPU,Memory
+        rom=hl_dispatch_diagnostic_rom();m=Memory(rom);c=CPU(m)
+        for _ in range(60):c.step()
+        self.assertEqual(m.wram[0],0x42)
+        with tempfile.TemporaryDirectory() as d:
+            root=pathlib.Path(d);source=root/'dispatch.gb';source.write_bytes(rom)
+            blocks=trace.compile_trace(source,root/'out',2)
+            self.assertIn((0,0x150),{(b['bank'],b['pc']) for b in blocks})
+            report=json.loads((root/'out'/'trace-profile.json').read_text())
+            self.assertEqual(report['hl_pointer_table_targets'],2)
+
+    def test_hl_dispatch_rejects_unknown_helpers_hl_writes_and_backward_jumps(self):
+        from trace_recompiler import hl_dispatch_table
+        original=hl_dispatch_diagnostic_rom()
+        self.assertEqual(hl_dispatch_table(original,0,0x102),0x120)
+        for address,replacement in ((0x130,bytes([0x77])),(0x111,bytes([0x21])),(0x106,bytes([0xFE]))):
+            rom=bytearray(original);rom[address:address+len(replacement)]=replacement
+            self.assertIsNone(hl_dispatch_table(rom,0,0x102))
+
+    def test_hl_dispatch_uses_selected_rom_bank(self):
+        from trace_recompiler import hl_dispatch_table
+        original=hl_dispatch_diagnostic_rom();rom=bytearray(0x10000)
+        rom[0x147:0x14A]=bytes([1,1,0])
+        rom[0x4100:0x4118]=original[0x100:0x118]
+        rom[0x4104]=0x41;rom[0x4110]=0x41
+        rom[0x4130:0x413D]=original[0x130:0x13D]
+        self.assertEqual(hl_dispatch_table(rom,1,0x4102),0x4120)
+        self.assertIsNone(hl_dispatch_table(rom,2,0x4102))
+        rom[0x100:0x118]=original[0x100:0x118]
+        rom[0x110]=0x41
+        self.assertIsNone(hl_dispatch_table(rom,0,0x102))
+    @unittest.skipUnless(os.environ.get('GB2MD_NATIVE_TESTS')=='1','opt-in external BlastEm integration')
+    def test_native_static_dispatch_discovery(self):
+        from build_recompiled import build
+        from run_compat_tests import _run_in_pty,_blastem_values
+        for name,fixture in (('hl-table',hl_dispatch_diagnostic_rom),('bank-call',constant_bank_call_diagnostic_rom)):
+            with self.subTest(name=name),tempfile.TemporaryDirectory() as d:
+                root=pathlib.Path(d);source=root/'original.gb';source.write_bytes(fixture())
+                build(source,root/'out',2)
+                commands='frames 600\np/x [$ff2300].b [$ff0018].l\nquit\n'
+                code,output,timed=_run_in_pty([os.environ['GB2MD_BLASTEM'],'-d',str(root/'out'/'recompiled.md')],commands,30)
+                values=_blastem_values(output)
+                self.assertFalse(timed,output);self.assertEqual(code,0,output)
+                self.assertEqual([values.get(a) for a in ('FF2300.b','FF0018.l')],[0x42,0],output)
+
     @unittest.skipUnless(os.environ.get('GB2MD_NATIVE_TESTS')=='1','opt-in external BlastEm integration')
     def test_native_joypad_selected_rows(self):
         from build_recompiled import build

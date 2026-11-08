@@ -61,6 +61,69 @@ def is_inline_rst_dispatch(rom, vector):
         address=rom[address+1]|rom[address+2]<<8
     return False
 
+def constant_bank_call_targets(rom,pc):
+    """Bounded candidates for fixed-ROM LD A,n / LD (mapper),A / CALL|JP.
+
+    Unwritten MBC1 upper bits and MBC5 bit 8 remain unknown: enumerate only
+    physically present banks instead of assuming their reset values. This is
+    coverage discovery only; native dispatch still selects the runtime bank.
+    Other stores, upper-window callers and partial high-bit writes are rejected.
+    """
+    if len(rom)<=0x147 or not 0<=pc<=0x4000-8:return []
+    raw=rom[pc:pc+8]
+    if len(raw)!=8 or raw[0]!=0x3E or raw[2]!=0xEA or raw[5] not in (0xCD,0xC3):return []
+    value=raw[1];address=raw[3]|raw[4]<<8;target=raw[6]|raw[7]<<8;mapper=rom[0x147]
+    if not 0x4000<=target<0x8000:return []
+    if mapper in (1,2,3) and 0x2000<=address<0x4000:
+        banks=[high|((value&31) or 1) for high in (0,0x20,0x40,0x60)]
+    elif 0x0F<=mapper<=0x13 and 0x2000<=address<0x4000:banks=[(value&127) or 1]
+    elif 0x19<=mapper<=0x1E and 0x2000<=address<0x3000:banks=[value,value|0x100]
+    else:return []
+    return [(bank,target) for bank in banks if bank*0x4000+target-0x4000<len(rom)]
+
+def hl_dispatch_table(rom,bank,pc):
+    """Track a ROM table through a bounded, bank-stable pointer lookup.
+
+    Only forward JR, NOP and BC/DE immediate setup preserve the tracked HL.
+    The exact helper consumes A (zero/one based) and returns table[A] in HL.
+    Unknown calls or HL writes terminate recognition instead of guessing.
+    """
+    signatures=(bytes.fromhex('cb274f0600094e23466069c9'),
+                bytes.fromhex('3dcb274f0600094e23466069c9'))
+    window_end=0x4000 if pc<0x4000 else 0x8000
+    def read(address,size):
+        if not 0<=address<0x8000 or address+size>(0x4000 if address<0x4000 else 0x8000):return None
+        if address<0x4000:offset=address
+        elif 0x4000<=pc<0x8000:offset=bank*0x4000+address-0x4000
+        elif rom[0x147] in (0,8,9):offset=address
+        else:return None
+        return rom[offset:offset+size] if offset+size<=len(rom) else None
+    head=read(pc,3)
+    if not head or head[0]!=0x21:return None
+    table=head[1]|head[2]<<8;cursor=pc+3;end=min(window_end,pc+32);resolved=False
+    for _ in range(12):
+        if cursor>=end:return None
+        raw=read(cursor,1)
+        if not raw:return None
+        op=raw[0]
+        if op==0xE9:return table if resolved else None
+        if op==0:cursor+=1
+        elif op in (0x01,0x11):
+            if not read(cursor,3) or cursor+3>end:return None
+            cursor+=3
+        elif op==0x18:
+            raw=read(cursor,2)
+            if not raw or raw[1]>=128:return None
+            cursor+=2+raw[1]
+        elif op==0xCD and not resolved:
+            raw=read(cursor,3)
+            if not raw or cursor+3>end:return None
+            helper=raw[1]|raw[2]<<8
+            if not any(read(helper,len(s))==s for s in signatures):return None
+            resolved=True;cursor+=3
+        else:return None
+    return None
+
 def parse_input_script(spec: str):
     """Parse controller pulses and optional generic trace-memory events.
 
@@ -442,7 +505,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
     # wall corrections, and similar input-dependent branches do not require an
     # exact frame script merely to avoid gb_missing_block.
     frontier=collections.deque(key for key in first if key[1] < 0x8000)
-    expanded=set();indirect_table_targets=set();hl_table_targets=set();rst_table_targets=set();banked_thunk_targets=set()
+    expanded=set();indirect_table_targets=set();hl_table_targets=set();rst_table_targets=set();banked_thunk_targets=set();constant_bank_targets=set()
     def rom_key(source_key,address):
         address &= 0xFFFF;source_bank,source_pc=source_key
         if address < 0x4000:return (0,address)
@@ -553,6 +616,10 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
         elif fam not in ("RET","RETI","JP_HL","HALT","STOP","INVALID","UNCLASSIFIED"):
             successors=[fall]
         for address in successors:add_rom_block(rom_key(key,address))
+        if op==0x3E and pc<0x4000:
+            for target_key in constant_bank_call_targets(rom,pc):
+                add_rom_block(target_key)
+                if target_key in first:constant_bank_targets.add(target_key)
         # Resolve a common bounded ROM dispatch idiom:
         #   LD HL,table / CALL index_helper / JP (HL)
         # The helper selects a little-endian pointer from the table. Require
@@ -563,8 +630,9 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
             elif bank:sequence_offset=bank*0x4000+pc-0x4000
             else:sequence_offset=-1
             sequence=rom[sequence_offset:sequence_offset+7] if sequence_offset>=0 else b""
-            if len(sequence)==7 and sequence[0]==0x21 and sequence[3]==0xCD and sequence[6]==0xE9:
-                table=sequence[1]|sequence[2]<<8;candidates=bounded_pointer_table(key,table)
+            table=(sequence[1]|sequence[2]<<8) if len(sequence)==7 and sequence[0]==0x21 and sequence[3]==0xCD and sequence[6]==0xE9 else hl_dispatch_table(rom,bank,pc)
+            if table is not None:
+                candidates=bounded_pointer_table(key,table)
                 if len(candidates)>=2:
                     for target_key in candidates:
                         hl_table_targets.add(target_key);indirect_table_targets.add(target_key);add_rom_block(target_key)
@@ -623,7 +691,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
                 block["idle_wait"]=True
     for block in blocks:block["native_lowered"]=native_body(block) is not None
     out.mkdir(parents=True,exist_ok=True)
-    (out/"trace-profile.json").write_text(json.dumps({"input":str(rom_path),"steps_per_scenario":steps,"auto_steps":auto_steps,"auto_inputs":auto_inputs,"total_steps_executed":sum(s["steps_executed"] for s in scenario_reports),"dynamic_unique_blocks":dynamic_unique_block_count,"indirect_table_targets":len(indirect_table_targets),"hl_pointer_table_targets":len(hl_table_targets),"rst_inline_table_targets":len(rst_table_targets),"banked_thunk_targets":len(banked_thunk_targets),"total_blocks_after_static_closure":len(blocks),"input_exploration":exploration_report,"scenarios":scenario_reports,"blocks":blocks},indent=2)+"\n")
+    (out/"trace-profile.json").write_text(json.dumps({"input":str(rom_path),"steps_per_scenario":steps,"auto_steps":auto_steps,"auto_inputs":auto_inputs,"total_steps_executed":sum(s["steps_executed"] for s in scenario_reports),"dynamic_unique_blocks":dynamic_unique_block_count,"indirect_table_targets":len(indirect_table_targets),"hl_pointer_table_targets":len(hl_table_targets),"rst_inline_table_targets":len(rst_table_targets),"banked_thunk_targets":len(banked_thunk_targets),"constant_bank_call_targets":len(constant_bank_targets),"total_blocks_after_static_closure":len(blocks),"input_exploration":exploration_report,"scenarios":scenario_reports,"blocks":blocks},indent=2)+"\n")
     used=sorted({b["family"] for b in blocks if not b["native_lowered"]})
     label=lambda b:f"L_gb_B{b['bank']:03X}_{b['pc']:04X}"
     block_by_key={(b["bank"],b["pc"]):b for b in blocks}
