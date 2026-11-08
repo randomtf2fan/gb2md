@@ -18,7 +18,9 @@ ROM signatures/extensions and common token/private-key patterns; history
 filenames were checked for ROM/build artifacts. These checks are not a claim
 of exhaustive credential detection or third-party provenance verification.
 
-Validation: 84 focused tests pass in the cleaned checkout. Its actual PyQt5
+Validation: the initial update passed 84 focused tests; the controller
+follow-up passes 86 unit tests and an opt-in native integration test. No
+diagnostic binaries or emulator logs are published. The actual PyQt5
 QProcess build compiled the original MBC3 RAM diagnostic using the sibling
 compiler/runtime; temporary outputs stayed outside the checkout. Native
 original diagnostics cover STAT polling, memory scanning, windows, RST

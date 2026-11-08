@@ -1,6 +1,21 @@
-import json, pathlib, subprocess, sys, tempfile, unittest
+import json, os, pathlib, subprocess, sys, tempfile, unittest
 
 ROOT = pathlib.Path(__file__).parents[1]
+
+def controller_diagnostic_rom(aggregate=False):
+    """Original tight JOYP scan, recording buttons/directions/both rows."""
+    rom=bytearray(0x8000)
+    program=bytearray([0xF3])
+    if aggregate:program.extend(bytes.fromhex('3effea10c0ea12c0ea14c0'))
+    loop=len(program)
+    for index,select in enumerate((0x10,0x20,0)):
+        program.extend(bytes([0x3E,select,0xE0,0,0xF0,0,0xEA,index,0xC0]))
+        if aggregate:
+            program.extend(bytes([0x21,0x10+index*2,0xC0,0xA6,0x77,0xFA,index,0xC0,0x23,0xB6,0x77]))
+    program.extend(bytes([0x18,(-(len(program)-loop+2))&255]))
+    rom[0x100:0x103]=bytes.fromhex('c35001')
+    rom[0x150:0x150+len(program)]=program
+    return bytes(rom)
 
 def stat_diagnostic_rom():
     """Original HBlank IRQ/HALT diagnostic; no third-party ROM data."""
@@ -63,6 +78,34 @@ def banked_rst_dispatch_diagnostic_rom():
     return bytes(rom)
 
 class SmokeTest(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get('GB2MD_NATIVE_TESTS')=='1','opt-in external BlastEm integration')
+    def test_native_joypad_selected_rows(self):
+        from build_recompiled import build
+        from run_compat_tests import _run_in_pty,_blastem_values
+        with tempfile.TemporaryDirectory() as d:
+            root=pathlib.Path(d);source=root/'original.gb'
+            source.write_bytes(controller_diagnostic_rom())
+            build(source,root/'out',500)
+            commands=('frames 600\nbinddown "gamepads.1.start"\n'
+                      'binddown "gamepads.1.right"\nframes 4\n'
+                      'p/x [$ff2300].b [$ff2301].b [$ff2302].b [$ff0018].l\nquit\n')
+            code,output,timed=_run_in_pty([os.environ['GB2MD_BLASTEM'],'-d',str(root/'out'/'recompiled.md')],commands,30)
+            values=_blastem_values(output)
+            self.assertFalse(timed,output);self.assertEqual(code,0,output)
+            self.assertEqual([values.get(a) for a in ('FF2300.b','FF2301.b','FF2302.b','FF0018.l')],[0xD7,0xEE,0xC6,0],output)
+
+    def test_controller_diagnostic_combines_selected_rows(self):
+        from gb_cpu import CPU,Memory
+        m=Memory(controller_diagnostic_rom());c=CPU(m);m.joypad_state=0x7E
+        for _ in range(100):c.step()
+        self.assertEqual(m.wram[:3],bytes([0xD7,0xEE,0xC6]))
+
+    def test_controller_diagnostic_records_all_reads(self):
+        from gb_cpu import CPU,Memory
+        m=Memory(controller_diagnostic_rom(True));c=CPU(m);m.joypad_state=0x7E
+        for _ in range(300):c.step()
+        self.assertEqual(m.wram[0x10:0x16],bytes([0xD7,0xD7,0xEE,0xEE,0xC6,0xC6]))
+
     def test_rst_thunks_require_proven_caller_mapping(self):
         import trace_recompiler as trace
         for steps,expected in ((1,False),(2,True)):

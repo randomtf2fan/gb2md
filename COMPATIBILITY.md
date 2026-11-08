@@ -2,7 +2,19 @@
 
 ## Development update — 2026-11-08
 
-The current source passes **84/84 focused tests**. The older dated results
+Controller follow-up: **86 unit tests plus one opt-in native integration test
+PASS**. Both selected JOYP rows now combine by active-low AND. A native tight
+scan records the expected D7/EE/C6 for Start+Right; aggregate tracking finds
+stable values with the tested six-button pad. An isolated X11 keyboard test
+also reaches those values through SDL. The user's desktop focus/USB/Wayland
+case remains unconfirmed. Default mappings are listed in README.
+
+In the tested private Tetris build, NEXT is visible, Select hides it and a
+second Select restores it, with missing markers zero. That is original game
+behavior, not a demonstrated rendering regression. No game-specific fix was
+added. Original ROMs and checkpoints are preserved.
+
+The earlier source snapshot passed **84/84 focused tests**. The older dated results
 below describe their respective revisions, not a full-suite rerun today.
 
 - Fixed unsafe VBlank skipping for STAT polls, LY inequalities/register

@@ -1731,8 +1731,8 @@ gb_read_joypad:
 .no_directions:
 	btst #5,gb_io
 	bne.s .joy_done
-	; Start with all four GB buttons released, then copy active-low bits.
-	ori.b #$0F,d0
+	; Both selected rows share active-low lines: preserve direction clears
+	; and AND in the button row instead of replacing those lines.
 	btst #4,d2
 	bne.s .gb_a_up
 	bclr #0,d0

@@ -49,6 +49,29 @@ chose a custom destination.
 The current GUI/build checks were run on Linux (Manjaro). Windows packaging
 and emulator integration have not been verified in this update.
 
+## Controller mapping
+
+GB2MD reads Genesis controller port 1. With BlastEm's default keyboard bindings:
+
+| Game Boy input | Genesis input | Keyboard |
+|---|---|---|
+| D-pad | D-pad | Arrow keys |
+| A / B | B / C | S / D |
+| Select | A | A |
+| Start | Start | Enter |
+
+Custom emulator mappings can differ. Click the game window to give it keyboard
+focus. In original Tetris, Select hides/restores NEXT; keyboard A therefore
+toggles that display rather than rotating a piece. Use S/D for rotation.
+
+An optional native controller regression requires external tools and a display:
+
+```sh
+GB2MD_NATIVE_TESTS=1 GB2MD_BLASTEM=/path/to/blastem GB2MD_VASM=/path/to/vasmm68k_mot python3 -m unittest discover -s tests -q
+```
+
+Ordinary unit tests skip that external-emulator test.
+
 ## Local dependencies and private inputs
 
 Python 3 is required. The native build expects an external vasm
@@ -61,7 +84,7 @@ all obligations are reviewed. BlastEm is optional and likewise treated as an
 external local test dependency.
 
 The `test_roms/` collection and all input `.gb`/`.gbc` files are local fixtures
-and are ignored by the repository safety rules. The 84 focused unit tests use
+and are ignored by the repository safety rules. The 86 focused unit tests use
 synthetic data and do not require commercial ROMs. Compatibility-suite runs
 require the user to supply the relevant test ROMs separately.
 
