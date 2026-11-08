@@ -1,5 +1,48 @@
 # GB2MD compatibility status
 
+## Banked discovery and code-size milestone — 2026-11-08
+
+**109/109 tests PASS with native integration enabled**: 106 ordinary tests
+plus three opt-in native methods. Original native fixtures cover banked tables,
+bank shadows/setters, consecutive calls, inline pointer tables, controller
+rows, and compact scheduler interrupt/mapper redirection.
+
+Mooneye timers and `reg_f`: **14/14 Python and native PASS**. The first native
+batch had 13 passes and a `div_write` timeout at 600 host frames; that ROM passes
+at 2,500. Those attempts remain separate in the private reports. All fourteen
+assemblies reproduce byte-identically with the final emitter. Native Blargg
+serial verification and broader CPU/PPU/DMA reruns remain open.
+
+The compiler now recognizes bounded bank/address tables, validated bank setters
+and RAM shadows, inline BC-indexed tables, and returns through bank-preserving
+leaf routines. Unknown effects still stop discovery. Native dispatch continues
+to check the active bank; there are no game-title/address patches.
+
+Untraced edges share native scheduler code. Identical 22,205-block coverage
+shrunk from 5,015,608 to 3,488,384 bytes (30.45%). This is a code-size result,
+not a measured performance improvement. Oversized output now fails before
+replacing a previous ROM. Larger-than-4-MiB cartridge mapping is unsupported.
+
+Tetris's preserved 7,187-block coverage was re-emitted and tested in BlastEm:
+movement, rotation and fast drops placed pieces and advanced the score to 16;
+Select hid/restored NEXT. Missing-block markers remained zero. This was a
+backend regression, not a new frontend trace or extended line-clear/top-out test.
+Known-good checkpoints remain unchanged.
+
+Pokémon's final inline-table build reaches Professor Oak and advances readable
+introductory dialogue in response to input. All four native samples have zero
+missing-block markers and advancing source cycles. The former $00:$1B8A trap
+is fixed. Player/rival naming, the initial room and overworld are unverified.
+This is an introduction milestone, not a gameplay PASS. Link's Awakening
+supports name entry/file creation, but its latest probe still traps at
+$14:$5000 during file entry. Neither game has verified playable gameplay.
+Current probes used a temporary BlastEm speed preset to shorten testing;
+their wall time is not a native performance measurement.
+
+GUI code is unchanged and uses its sibling compiler, including the new
+`bank_analysis.py` module. Restart the GUI and recompile after updating.
+The sections below are historical results for earlier source snapshots.
+
 ## Development update — 2026-11-08
 
 Latest dispatch follow-up: **92 ordinary tests PASS, two opt-in native tests

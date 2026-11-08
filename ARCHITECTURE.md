@@ -162,6 +162,11 @@ ambiguous banked helpers. These discoveries use the same bounded table reader
 and `hl_pointer_table_targets` counter. This covers more dispatch shapes; it
 does not resolve arbitrary computed jumps.
 
+The same helper also verifies inline BC-indexed lookups with optional BC
+save/restore: double A, form a BC index, add it to the ROM table in HL, load
+the little-endian target and JP(HL). Unknown instruction sequences do not
+qualify. These use the existing bounded table reader and HL-target counter.
+
 `constant_bank_call_targets()` recognizes fixed-window `LD A,n / LD (mapper),A /
 CALL nn` or `JP nn`. Valid MBC1/MBC3/MBC5 low-bank register writes yield a
 bounded set of physically present target banks. Unwritten MBC1 high bits and
@@ -169,6 +174,31 @@ the MBC5 ninth bit are enumerated rather than assumed zero. Partial high-bit
 writes, other stores and upper-window callers are rejected. Targets are counted
 separately in `constant_bank_call_targets` in trace/build reports. This adds
 coverage only: live native bank dispatch still determines which code executes.
+
+The constant-bank recognizer also permits bounded WRAM/HRAM shadow stores and
+fixed-ROM setter helpers verified by `_bank_setter_register()`. A setter must
+contain only one supported bank write, optional shadow stores and RET; changes
+to A, unknown calls, hardware I/O shadows and partial high-bit writes reject it.
+`constant_bank_call_site()` returns the actual call/jump PC for subsequent
+context propagation instead of assuming all accepted sequences have equal size.
+
+`banked_pointer_table_targets()` recognizes a verified three-byte lookup
+sequence that returns an address in HL and stores a selected bank in WRAM or
+HRAM. Each ROM table entry contains `bank, address_low, address_high`. It reads
+at most 64 entries and requires two valid entries, validates physical bank and
+instruction boundaries, and rejects unknown code or I/O state operands. It
+does not infer arbitrary far-call conventions. Its targets have a separate
+`banked_pointer_table_targets` counter and join the indirect-target aggregate.
+
+`bank_analysis.py` adds a limited bank-effect proof. Starting after a constant
+mapper write, `fixed_bank_context_targets()` follows fixed-ROM control flow for
+up to 128 distinct states. `leaf_preserves_rom_bank()` checks both branch
+outcomes of a leaf routine, tracking constant HL for safe RAM stores. Unknown
+stores, nested calls, computed jumps and exhausted budgets reject the proof.
+Only a proven leaf return permits unconditional context propagation to the
+next call. This improves consecutive banked calls without assuming that an
+arbitrary callee preserves mapping. Candidates are reported as
+`bank_context_targets`; these are coverage facts, not changes to live dispatch.
 
 The second recognizes an exact SM83 inline table-call handler reached through
 `RST`: the handler pops the stacked return address, indexes the pointer table
@@ -190,6 +220,12 @@ SM83 interpreter.
 
 ## Native SM83-to-68000 lowering
 
+After discovery and idle-loop annotations, `emit_native_blocks()` emits the
+native assembly from block metadata. Tests can re-emit identical coverage to
+compare code-generation policies without repeating reference execution. Normal
+CLI/GUI compilation still runs discovery; there is no unchecked trace-cache
+option exposed to users.
+
 `lr35902_lowering.family()` maps SM83 opcodes into semantic families such as
 `LD_R_R`, `ADD_A_R`, `CALL`, `CB`, and `DAA`. `native_body()` in
 `trace_recompiler.py` lowers supported families into Motorola syntax.
@@ -207,6 +243,24 @@ Straight-line chains accumulate up to `SCHEDULER_BATCH_T_CYCLES` in 68000
 register `d7`, then call `gb_tick` at a scheduling boundary. Timing-sensitive
 I/O, delayed `EI`, HALT, branches, and possible interrupts force earlier
 synchronization.
+
+Targets with zero reference hits use a small edge stub feeding shared
+`gb_chain_compact` code; traced targets retain the existing inline fast stubs.
+The compact edge passes expected PC/bank in d0/d1 and pushes the native entry
+address on the 68000 stack. On a fast step, RTS enters that native block. On a
+scheduling boundary, the helper saves expected PC/bank across `gb_tick`, checks
+for HALT/interrupt/bank redirection, and either enters the native destination
+or unwinds its temporary stack before general dispatch. d7 remains the cycle
+accumulator. This shares generated code, not SM83 instruction interpretation.
+
+`native-codegen-report.json` records compact/hot chain counts. In one identical
+22,205-block trace, sharing cold edges reduced the ROM from 5,015,608 to
+3,488,384 bytes. Extra stack traffic on cold paths can cost execution time;
+this is a size improvement, not a measured speedup. T-cycle costs are unchanged.
+`build()` assembles to `recompiled.raw.bin` and rejects images exceeding the
+supported 4 MiB cartridge layout before writing `recompiled.md`, preserving
+an existing output ROM on that failure. Larger Genesis cartridge mapping is
+not implemented.
 
 ## Genesis runtime and memory mapping
 

@@ -11,6 +11,7 @@ import argparse, collections, copy, hashlib, json, pathlib, re, struct
 from gb_cpu import CPU, Memory, instruction_cycles
 from lr35902_lowering import family
 from gb2md import instruction_length
+from bank_analysis import fixed_bank_context_targets
 
 REGS=("gb_b","gb_c","gb_d","gb_e","gb_h","gb_l",None,"gb_a")
 REGS16=("gb_b","gb_d","gb_h","gb_sp")
@@ -61,25 +62,73 @@ def is_inline_rst_dispatch(rom, vector):
         address=rom[address+1]|rom[address+2]<<8
     return False
 
-def constant_bank_call_targets(rom,pc):
-    """Bounded candidates for fixed-ROM LD A,n / LD (mapper),A / CALL|JP.
-
-    Unwritten MBC1 upper bits and MBC5 bit 8 remain unknown: enumerate only
-    physically present banks instead of assuming their reset values. This is
-    coverage discovery only; native dispatch still selects the runtime bank.
-    Other stores, upper-window callers and partial high-bit writes are rejected.
-    """
-    if len(rom)<=0x147 or not 0<=pc<=0x4000-8:return []
-    raw=rom[pc:pc+8]
-    if len(raw)!=8 or raw[0]!=0x3E or raw[2]!=0xEA or raw[5] not in (0xCD,0xC3):return []
-    value=raw[1];address=raw[3]|raw[4]<<8;target=raw[6]|raw[7]<<8;mapper=rom[0x147]
-    if not 0x4000<=target<0x8000:return []
+def _selected_bank_candidates(rom,value,address):
+    """Physical candidates after one supported low-bank-register write."""
+    mapper=rom[0x147]
     if mapper in (1,2,3) and 0x2000<=address<0x4000:
         banks=[high|((value&31) or 1) for high in (0,0x20,0x40,0x60)]
     elif 0x0F<=mapper<=0x13 and 0x2000<=address<0x4000:banks=[(value&127) or 1]
     elif 0x19<=mapper<=0x1E and 0x2000<=address<0x3000:banks=[value,value|0x100]
     else:return []
-    return [(bank,target) for bank in banks if bank*0x4000+target-0x4000<len(rom)]
+    return [bank for bank in banks if bank*0x4000<len(rom)]
+
+def _shadow_store_end(rom,pc,end):
+    """A-preserving WRAM/HRAM bank-shadow store, never a hardware I/O write."""
+    if pc+2<=end and rom[pc]==0xE0 and 0x80<=rom[pc+1]<0xFF:return pc+2
+    if pc+3<=end and rom[pc]==0xEA:
+        address=rom[pc+1]|rom[pc+2]<<8
+        if 0xC000<=address<0xE000 or 0xFF80<=address<0xFFFF:return pc+3
+    return None
+
+def _bank_setter_register(rom,pc):
+    """Verify a short fixed-ROM bank store plus optional shadows and RET."""
+    if not 0<=pc<0x4000:return None
+    end=min(len(rom),0x4000,pc+16);address=None
+    for _ in range(6):
+        if pc>=end:return None
+        if rom[pc]==0xC9:return address
+        shadow=_shadow_store_end(rom,pc,end)
+        if shadow is not None:pc=shadow;continue
+        if pc+3<=end and rom[pc]==0xEA and address is None:
+            candidate=rom[pc+1]|rom[pc+2]<<8
+            if _selected_bank_candidates(rom,1,candidate):address=candidate;pc+=3;continue
+        return None
+    return None
+
+def constant_bank_call_site(rom,pc):
+    """Resolve bounded LD A,n / bank selection / CALL|JP in fixed ROM.
+
+    Bank selection may use a direct mapper store or a verified store-only
+    setter helper. At most two RAM shadow stores are allowed on either side.
+    Unknown calls, A changes and upper-window callers terminate recognition.
+    """
+    if len(rom)<=0x147 or not 0<=pc<=0x4000-8 or rom[pc]!=0x3E:return None
+    value=rom[pc+1];cursor=pc+2;end=min(len(rom),0x4000,pc+24)
+    for _ in range(2):
+        shadow=_shadow_store_end(rom,cursor,end)
+        if shadow is None:break
+        cursor=shadow
+    if cursor+3>end:return None
+    operand=rom[cursor+1]|rom[cursor+2]<<8
+    if rom[cursor]==0xEA:address=operand
+    elif rom[cursor]==0xCD:address=_bank_setter_register(rom,operand)
+    else:return None
+    if address is None:return None
+    cursor+=3
+    for _ in range(2):
+        shadow=_shadow_store_end(rom,cursor,end)
+        if shadow is None:break
+        cursor=shadow
+    if cursor+3>end or rom[cursor] not in (0xCD,0xC3):return None
+    target=rom[cursor+1]|rom[cursor+2]<<8
+    if not 0x4000<=target<0x8000:return None
+    targets=[(bank,target) for bank in _selected_bank_candidates(rom,value,address)
+             if bank*0x4000+target-0x4000<len(rom)]
+    return (cursor,targets) if targets else None
+
+def constant_bank_call_targets(rom,pc):
+    site=constant_bank_call_site(rom,pc)
+    return site[1] if site is not None else []
 
 def hl_dispatch_table(rom,bank,pc):
     """Track a ROM table through a bounded, bank-stable pointer lookup.
@@ -101,6 +150,9 @@ def hl_dispatch_table(rom,bank,pc):
     head=read(pc,3)
     if not head or head[0]!=0x21:return None
     table=head[1]|head[2]<<8;cursor=pc+3;end=min(window_end,pc+32);resolved=False
+    # Inline A*2 / BC-index / little-endian HL lookup, with optional BC save.
+    inline=(bytes.fromhex('c58706004f09c12a666fe9'),bytes.fromhex('8706004f092a666fe9'))
+    if any(read(cursor,len(signature))==signature for signature in inline):return table
     for _ in range(12):
         if cursor>=end:return None
         raw=read(cursor,1)
@@ -123,6 +175,48 @@ def hl_dispatch_table(rom,bank,pc):
             resolved=True;cursor+=3
         else:return None
     return None
+
+def banked_pointer_table_targets(rom,bank,pc,max_entries=64):
+    """Recognize a bounded bank/lo/hi lookup returning HL and a bank byte.
+
+    The exact index/three-byte-load sequence is verified, while table, index
+    and bank-variable addresses are operands, not cartridge-specific constants.
+    Only WRAM/HRAM state operands and a known ROM window are accepted. These
+    are speculative coverage candidates; this never changes live bank dispatch.
+    """
+    if len(rom)<=0x147:return []
+    mapper=rom[0x147]
+    if mapper not in (1,2,3) and not 0x0F<=mapper<=0x13 and not 0x19<=mapper<=0x1E:return []
+    def read(address,size):
+        if not 0<=address<0x8000 or address+size>(0x4000 if address<0x4000 else 0x8000):return None
+        if address<0x4000:offset=address
+        elif 0x4000<=pc<0x8000:offset=bank*0x4000+address-0x4000
+        else:return None
+        return rom[offset:offset+size] if offset+size<=len(rom) else None
+    raw=read(pc,30)
+    if not raw or raw[0]!=0x21 or raw[3:7]!=bytes.fromhex('110000fa'):return []
+    if raw[9:21]!=bytes.fromhex('5f87835f30011419545d1aea') or raw[23:]!=bytes.fromhex('131a6f131a67c9'):return []
+    index_address=raw[7]|raw[8]<<8;bank_address=raw[21]|raw[22]<<8
+    is_work_ram=lambda a:0xC000<=a<0xE000 or 0xFF80<=a<0xFFFF
+    if not is_work_ram(index_address) or not is_work_ram(bank_address):return []
+    table=raw[1]|raw[2]<<8;targets=[];entries=0
+    for index in range(min(max_entries,64)):
+        entry=read(table+3*index,3)
+        if entry is None:break
+        value,target=entry[0],entry[1]|entry[2]<<8
+        if not 0x100<=target<0x8000:break
+        banks=_selected_bank_candidates(rom,value,0x2000)
+        candidates=[]
+        for active_bank in banks:
+            if active_bank*0x4000>=len(rom):continue
+            offset=target if target<0x4000 else active_bank*0x4000+target-0x4000
+            if offset>=len(rom) or family(rom[offset]) in ('INVALID','STOP'):continue
+            size=instruction_length(rom[offset])
+            if offset+size>len(rom) or target+size>(0x4000 if target<0x4000 else 0x8000):continue
+            candidates.append((0 if target<0x4000 else active_bank,target))
+        if not candidates:break
+        targets.extend(candidates);entries+=1
+    return list(dict.fromkeys(targets)) if entries>=2 else []
 
 def parse_input_script(spec: str):
     """Parse controller pulses and optional generic trace-memory events.
@@ -505,7 +599,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
     # wall corrections, and similar input-dependent branches do not require an
     # exact frame script merely to avoid gb_missing_block.
     frontier=collections.deque(key for key in first if key[1] < 0x8000)
-    expanded=set();indirect_table_targets=set();hl_table_targets=set();rst_table_targets=set();banked_thunk_targets=set();constant_bank_targets=set()
+    expanded=set();indirect_table_targets=set();hl_table_targets=set();rst_table_targets=set();banked_thunk_targets=set();constant_bank_targets=set();far_table_targets=set();bank_context_targets=set()
     def rom_key(source_key,address):
         address &= 0xFFFF;source_bank,source_pc=source_key
         if address < 0x4000:return (0,address)
@@ -617,15 +711,25 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
             successors=[fall]
         for address in successors:add_rom_block(rom_key(key,address))
         if op==0x3E and pc<0x4000:
-            for target_key in constant_bank_call_targets(rom,pc):
-                add_rom_block(target_key)
-                if target_key in first:constant_bank_targets.add(target_key)
+            site=constant_bank_call_site(rom,pc)
+            if site is not None:
+                call_pc,candidates=site
+                for target_key in candidates:
+                    add_rom_block(target_key)
+                    if target_key in first:constant_bank_targets.add(target_key)
+                    for context_target in fixed_bank_context_targets(rom,target_key[0],call_pc):
+                        add_rom_block(context_target)
+                        if context_target in first:bank_context_targets.add(context_target)
         # Resolve a common bounded ROM dispatch idiom:
         #   LD HL,table / CALL index_helper / JP (HL)
         # The helper selects a little-endian pointer from the table. Require
         # at least two consecutive, valid ROM code pointers and stop at the
         # first invalid entry; this avoids treating arbitrary data as code.
         if op==0x21 and pc+7<=0x8000:
+            for target_key in banked_pointer_table_targets(rom,bank,pc):
+                add_rom_block(target_key)
+                if target_key in first:
+                    far_table_targets.add(target_key);indirect_table_targets.add(target_key)
             if pc<0x4000:sequence_offset=pc
             elif bank:sequence_offset=bank*0x4000+pc-0x4000
             else:sequence_offset=-1
@@ -691,7 +795,12 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
                 block["idle_wait"]=True
     for block in blocks:block["native_lowered"]=native_body(block) is not None
     out.mkdir(parents=True,exist_ok=True)
-    (out/"trace-profile.json").write_text(json.dumps({"input":str(rom_path),"steps_per_scenario":steps,"auto_steps":auto_steps,"auto_inputs":auto_inputs,"total_steps_executed":sum(s["steps_executed"] for s in scenario_reports),"dynamic_unique_blocks":dynamic_unique_block_count,"indirect_table_targets":len(indirect_table_targets),"hl_pointer_table_targets":len(hl_table_targets),"rst_inline_table_targets":len(rst_table_targets),"banked_thunk_targets":len(banked_thunk_targets),"constant_bank_call_targets":len(constant_bank_targets),"total_blocks_after_static_closure":len(blocks),"input_exploration":exploration_report,"scenarios":scenario_reports,"blocks":blocks},indent=2)+"\n")
+    (out/"trace-profile.json").write_text(json.dumps({"input":str(rom_path),"steps_per_scenario":steps,"auto_steps":auto_steps,"auto_inputs":auto_inputs,"total_steps_executed":sum(s["steps_executed"] for s in scenario_reports),"dynamic_unique_blocks":dynamic_unique_block_count,"indirect_table_targets":len(indirect_table_targets),"hl_pointer_table_targets":len(hl_table_targets),"rst_inline_table_targets":len(rst_table_targets),"banked_thunk_targets":len(banked_thunk_targets),"constant_bank_call_targets":len(constant_bank_targets),"banked_pointer_table_targets":len(far_table_targets),"bank_context_targets":len(bank_context_targets),"total_blocks_after_static_closure":len(blocks),"input_exploration":exploration_report,"scenarios":scenario_reports,"blocks":blocks},indent=2)+"\n")
+    emit_native_blocks(blocks,out)
+    return blocks
+
+def emit_native_blocks(blocks,out):
+    """Emit validated block metadata without repeating reference discovery."""
     used=sorted({b["family"] for b in blocks if not b["native_lowered"]})
     label=lambda b:f"L_gb_B{b['bank']:03X}_{b['pc']:04X}"
     block_by_key={(b["bank"],b["pc"]):b for b in blocks}
@@ -762,9 +871,31 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
     # gb_tick may redirect execution for an IRQ, so validate PC/bank before
     # entering the successor. Returns, JP (HL), mapper changes, and IRQ entry
     # continue through the general dispatcher below.
+    compact_targets={key for key in chain_targets if block_by_key[key]['hits']==0}
     for bank,target in sorted(chain_targets):
         stem=f"B{bank:03X}_{target:04X}"
+        if (bank,target) in compact_targets:
+            # Untraced static coverage can be large. Share the scheduler body
+            # rather than copying it into every cold instruction's edge stub.
+            # The 68000 return address is the native destination, not a GB
+            # interpreter entry. No host temporary except d7 is live here.
+            lines += [f"gb_chain_{stem}:",f"\tmove.w #${target:04X},d0",f"\tmove.w #${bank:04X},d1",
+                      f"\tpea {label(block_by_key[(bank,target)])}","\tjmp gb_chain_compact",""]
+            continue
         lines += [f"gb_chain_{stem}:","\ttst.b gb_force_tick",f"\tbne.s .chain_flush_{stem}","\ttst.b gb_ei_delay",f"\tbne.s .chain_flush_{stem}","\tmoveq #0,d0","\tmove.b gb_step_cycles,d0","\tmoveq #0,d1","\tmove.w d7,d1","\tadd.w d0,d1",f"\tcmpi.w #{SCHEDULER_BATCH_T_CYCLES},d1",f"\tbhs.s .chain_flush_{stem}","\tmove.w d1,d7",f"\tjmp {label(block_by_key[(bank,target)])}",f".chain_flush_{stem}:","\tclr.b gb_force_tick",f"\tmove.w #${target:04X},gb_pc","\tjsr gb_tick","\ttst.b gb_halted",f"\tbeq.s .chain_awake_{stem}","\tjmp gb_dispatch",f".chain_awake_{stem}:",f"\tcmpi.w #${bank:04X},gb_bank",f"\tbeq.s .chain_bank_ok_{stem}","\tjmp gb_dispatch_tree",f".chain_bank_ok_{stem}:",f"\tcmpi.w #${target:04X},gb_pc",f"\tbeq.s .chain_pc_ok_{stem}","\tjmp gb_dispatch_tree",f".chain_pc_ok_{stem}:",f"\tjmp {label(block_by_key[(bank,target)])}",""]
+    if compact_targets:
+        lines += ["gb_chain_compact:","\ttst.b gb_force_tick","\tbne.s .compact_flush",
+                  "\ttst.b gb_ei_delay","\tbne.s .compact_flush","\tmoveq #0,d2",
+                  "\tmove.b gb_step_cycles,d2","\tadd.w d7,d2",
+                  f"\tcmpi.w #{SCHEDULER_BATCH_T_CYCLES},d2","\tbhs.s .compact_flush",
+                  "\tmove.w d2,d7","\trts",".compact_flush:","\tmove.w d0,gb_pc",
+                  "\tmove.w d1,-(sp)","\tmove.w d0,-(sp)","\tclr.b gb_force_tick",
+                  "\tjsr gb_tick","\ttst.b gb_halted","\tbne.s .compact_halted",
+                  "\tmove.w (sp)+,d0","\tcmp.w gb_pc,d0","\tbne.s .compact_pc_changed",
+                  "\tmove.w (sp)+,d0","\tcmp.w gb_bank,d0","\tbne.s .compact_bank_changed",
+                  "\trts",".compact_halted:","\taddq.l #8,sp","\tjmp gb_dispatch",
+                  ".compact_pc_changed:","\taddq.l #6,sp","\tjmp gb_dispatch_tree",
+                  ".compact_bank_changed:","\taddq.l #4,sp","\tjmp gb_dispatch_tree",""]
     # Balanced native decision tree: about log2(N) comparisons rather than a
     # linear scan through every compiled block on every GB instruction.
     lines += ["gb_dispatch_tree:","\tjsr gb_normalize_bank","\tmoveq #0,d0","\tmove.w gb_bank,d0","\tswap d0","\tmove.w gb_pc,d0","\tjmp .dispatch_node_0"]
@@ -782,6 +913,10 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
     for block in blocks: lines += [f"\tdc.w ${block['bank']:04X},${block['pc']:04X}",f"\tdc.l {label(block)}"]
     lines += ["\tdc.w $FFFF,$FFFF","\tdc.l 0"]
     (out/"translated_trace.s").write_text("\n".join(lines))
+    (out/"native-codegen-report.json").write_text(json.dumps({
+        "blocks":len(blocks),"chain_targets":len(chain_targets),
+        "compact_chain_targets":len(compact_targets),
+        "hot_chain_targets":len(chain_targets)-len(compact_targets)},indent=2)+"\n")
     return blocks
 
 def main():

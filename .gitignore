@@ -34,6 +34,7 @@
 # Generated compiler/assembler products when a custom output directory is used.
 **/trace-profile.json
 **/build-report.json
+**/native-codegen-report.json
 **/memory-plan.json
 **/translated_trace.s
 **/translated_bank0.s
