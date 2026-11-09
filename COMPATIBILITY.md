@@ -1,5 +1,43 @@
 # GB2MD compatibility status
 
+## Long input exploration and native room movement — 2026-11-09
+
+**126/126 tests PASS with native integration enabled** (121 ordinary and five
+opt-in native methods). Fresh Python/frontend/native timer/reg_f checks pass
+**14/14 in both domains with every scheduler chain forced compact**. Original
+fixtures verify live controller input, RAM callbacks, initial-state bridges,
+IRQ/mapper stack handling and bounded capacity retries. The GUI completed a
+real original-ROM build with the sweep setting and cancelled a running build.
+
+Optional `--input-sweep-steps` (GUI: Long input sweep) now follows a longer
+Start/A trajectory with varied holds and explicit releases before short forks.
+It consumes the existing input safety budget and is off by default. Snapshot
+hashes now include pending DMA state and held inputs; useful non-novel states
+are retained from initial snapshots as well as deeper branches. These are
+general exploration changes; generated ROMs still read live controllers.
+
+The private Pokémon candidate reached the opening room, displayed the SNES
+interaction, and responded to Right, Down and Up. Camera/OAM endpoints matched
+the corresponding reference room tests, including boundary stops. Missing-block
+markers stayed zero during those actions. Walking to the staircase then traps
+at `$12:$4168` when loading the downstairs callback. The reference reaches that
+same target and continues. This is **limited room gameplay, not complete game
+compatibility**; downstairs, outdoors, battles, saves and audio are unverified.
+
+The deeper trace visited the older `$17:$40B0` callback 133 times. Its first
+native image exceeded 4 MiB because many newly visited paths gained duplicated
+scheduler stubs. The builder now halves a profile-ranked inline-stub quota and
+reassembles without discarding any entries or retracing. It stops at zero and
+preserves previous ROMs if no layout fits. The tested candidate retains every
+entry from the previous build and adds 126. This is a capacity fallback, not a
+speedup claim. A room interval measures about 11.64 source GB frames/second when
+normalized to 60 Genesis frames/second; it is not wall-clock FPS at accelerated
+BlastEm speed. Performance work remains pending.
+
+Other games were not newly playtested. Earlier sections record historical
+results. No commercial ROMs, generated game code, screenshots or state files
+are included in the public source repository.
+
 ## Bounded discovery milestone — 2026-11-08
 
 **119/119 tests PASS with native integration enabled**: 114 ordinary tests

@@ -119,6 +119,11 @@ interrupt/HALT state, mapper state, timing phase, writable memory, I/O, and
 external RAM. Excluding relevant state here could incorrectly merge snapshots
 whose future behavior differs.
 
+The key also includes DMA request/start/active state, source, index and phase,
+plus the currently held input byte. Equal memory arrays do not imply equal
+future bus reads or JOYP values while those fields differ. Original regressions
+check each field independently; CPU/peripheral semantics are unchanged.
+
 The explorer branches from selected snapshots using bounded actions from
 `AUTO_INPUT_ACTIONS`, including individual buttons, directions, and a small set
 of useful combinations. Each press is followed by release because
@@ -131,6 +136,31 @@ code. The explorer therefore retains a small quota of deduplicated non-novel
 depth, instructions per branch, total exploration instructions, hold duration,
 snapshot interval/count, and bridge quota bound the search. The generated ROM
 does not replay exploration inputs; it polls the real Genesis controller.
+
+Bridge states are eligible from initial snapshots as well as deeper branches.
+A first press can latch a RAM flag without executing any novel PC; dropping it
+would prevent a later press from reaching a new computed target. An original
+branchless Start-then-A fixture covers this case with the same quotas and depth
+limits. Deduplication and budget checks still bound those initial bridges.
+
+An optional `--input-sweep-steps N` adds a longer trajectory before those short
+forks. `InputSweep` alternates Start and A, with explicit release intervals and
+five bounded hold scales relative to `input_hold_frames`. Release lengths vary
+as well, avoiding a single fixed sampling phase. It starts from the completed
+no-input CPU state and records real execution, so ROM data copied into RAM and
+later used as a callback is discovered without knowing its addresses or format.
+This heuristic does not recognize menus or guarantee progress in every game.
+
+The sweep is off by default and requires `--auto-inputs`. It consumes one
+branch and at most `min(N, input_max_steps)` instructions from the existing
+input budget; it is not extra execution outside the safety limit. Depth limits
+apply to subsequent forks, while the macro trajectory has its own instruction
+bound. A bounded deque retains recent JOYP states for ordinary exploration
+afterward. Reports identify sweep steps, new blocks, press count, endpoint and
+stop reason separately. The GUI exposes the same optional budget as "Long input
+sweep"; cancellation remains the existing compiler-process cancellation path.
+An original ROM requires three separate A edges before calling a pointer stored
+in WRAM; its test verifies discovery and the shared instruction cap.
 
 ## Static control-flow closure
 
@@ -294,7 +324,11 @@ I/O, delayed `EI`, HALT, branches, and possible interrupts force earlier
 synchronization.
 
 Targets with zero reference hits use a small edge stub feeding shared
-`gb_chain_compact` code; traced targets retain the existing inline fast stubs.
+`gb_chain_compact` code; normally traced targets retain inline fast stubs.
+`emit_native_blocks(..., max_hot_chains=N)` can limit duplicated stubs to the
+N most frequently traced targets, with bank/PC breaking ties deterministically.
+Every translated instruction and dispatch entry remains present. The default
+None retains the original layout; this API changes layout, not CPU semantics.
 The compact edge passes expected PC/bank in d0/d1 and pushes the native entry
 address on the 68000 stack. On a fast step, RTS enters that native block. On a
 scheduling boundary, the helper saves expected PC/bank across `gb_tick`, checks
@@ -302,14 +336,21 @@ for HALT/interrupt/bank redirection, and either enters the native destination
 or unwinds its temporary stack before general dispatch. d7 remains the cycle
 accumulator. This shares generated code, not SM83 instruction interpretation.
 
-`native-codegen-report.json` records compact/hot chain counts. In one identical
+`native-codegen-report.json` records compact/hot chain counts and the limit.
+In one identical
 22,205-block trace, sharing cold edges reduced the ROM from 5,015,608 to
 3,488,384 bytes. Extra stack traffic on cold paths can cost execution time;
 this is a size improvement, not a measured speedup. T-cycle costs are unchanged.
-`build()` assembles to `recompiled.raw.bin` and rejects images exceeding the
-supported 4 MiB cartridge layout before writing `recompiled.md`, preserving
-an existing output ROM on that failure. Larger Genesis cartridge mapping is
-not implemented.
+`build()` assembles to `recompiled.raw.bin`. If the image exceeds the supported
+4 MiB cartridge layout, it halves the duplicated-stub quota and reassembles,
+using the existing trace rather than rerunning discovery. Each retry strictly
+decreases the quota to zero; `native_layout_attempts` records sizes and counts.
+If the fully compact layout still does not fit, the build fails before writing
+`recompiled.md`, preserving any previous ROM. No coverage is removed to fit.
+Larger Genesis cartridge mapping is not implemented. Mixed/all-compact IRQ and
+mapper tests exercise scheduler equivalence; all-compact timer/reg_f signatures
+also passed in native execution. Extra stack traffic can affect host throughput,
+so this capacity fallback is not a claim of faster games.
 
 ## Genesis runtime and memory mapping
 

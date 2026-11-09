@@ -67,7 +67,10 @@ def validate_inputs(rom_text: str, output_text: str, steps: int) -> tuple[Path, 
 def compiler_command(rom: Path, output: Path, steps: int, auto_steps: bool = False,
                      auto_max_steps: int = 50_000_000, auto_inputs: bool = False,
                      input_max_branches: int = 128, input_max_depth: int = 4,
-                     input_max_steps: int = 20_000_000) -> tuple[str, list[str]]:
+                     input_max_steps: int = 20_000_000,
+                     input_sweep_steps: int = 0) -> tuple[str, list[str]]:
+    if input_sweep_steps<0 or (input_sweep_steps and not auto_inputs):
+        raise ValueError('Long input sweeps require controller exploration.')
     arguments = [
         str(ROOT / "build_recompiled.py"),
         str(rom),
@@ -82,6 +85,8 @@ def compiler_command(rom: Path, output: Path, steps: int, auto_steps: bool = Fal
         arguments += ["--auto-inputs", "--input-max-branches", str(input_max_branches),
                       "--input-max-depth", str(input_max_depth),
                       "--input-max-steps", str(input_max_steps)]
+        if input_sweep_steps:
+            arguments += ["--input-sweep-steps", str(input_sweep_steps)]
     return sys.executable, arguments
 
 
@@ -129,8 +134,17 @@ class ConverterWindow(QMainWindow):
         self.input_max_steps.setValue(20_000_000)
         self.input_max_steps.setGroupSeparatorShown(True)
         self.input_max_steps.setSuffix(" steps")
+        self.input_sweep_steps = QSpinBox()
+        self.input_sweep_steps.setRange(0,2_000_000_000)
+        self.input_sweep_steps.setGroupSeparatorShown(True)
+        self.input_sweep_steps.setSuffix(" steps")
+        self.input_sweep_steps.setSpecialValueText("Off")
+        self.input_sweep_steps.setToolTip(
+            "Optional varied Start/A presses before short input branches. "
+            "Uses the input safety limit, not an additional budget. "
+            "This heuristic does not guarantee complete coverage.")
         self.auto_inputs.setChecked(True)
-        for control in (self.input_branches,self.input_depth,self.input_max_steps):
+        for control in (self.input_branches,self.input_depth,self.input_max_steps,self.input_sweep_steps):
             control.setEnabled(True)
             self.auto_inputs.toggled.connect(control.setEnabled)
 
@@ -145,6 +159,7 @@ class ConverterWindow(QMainWindow):
         form.addRow("Branch limit", self.input_branches)
         form.addRow("Input depth", self.input_depth)
         form.addRow("Input safety limit", self.input_max_steps)
+        form.addRow("Long input sweep", self.input_sweep_steps)
 
         self.compile_button = QPushButton("Compile ROM")
         self.compile_button.setObjectName("compileButton")
@@ -253,7 +268,7 @@ class ConverterWindow(QMainWindow):
                 return
 
         output.mkdir(parents=True, exist_ok=True)
-        program, arguments = compiler_command(rom, output, self.steps.value(), self.auto_steps.isChecked(), self.auto_max.value(), self.auto_inputs.isChecked(), self.input_branches.value(), self.input_depth.value(), self.input_max_steps.value())
+        program, arguments = compiler_command(rom, output, self.steps.value(), self.auto_steps.isChecked(), self.auto_max.value(), self.auto_inputs.isChecked(), self.input_branches.value(), self.input_depth.value(), self.input_max_steps.value(),self.input_sweep_steps.value() if self.auto_inputs.isChecked() else 0)
         self.output_path = output
         self.log.clear()
         self.log.appendPlainText("$ " + shlex.join([program, *arguments]))

@@ -24,6 +24,29 @@ AUTO_INPUT_ACTIONS=list(BUTTON_STATES.items())+[
    ("select|start",BUTTON_STATES["select"]&BUTTON_STATES["start"])]
 SCHEDULER_BATCH_T_CYCLES=200
 
+class InputSweep:
+    """Deterministic Start/A edges with varied holds and explicit releases.
+
+    This is a coverage heuristic, not menu recognition. Five hold scales and
+    three release scales avoid repeatedly sampling only one fixed input phase.
+    Execution remains bounded by the caller's instruction budget.
+    """
+    def __init__(self,start_frame,hold_frames):
+        if start_frame<0 or hold_frames<=0:raise ValueError('invalid input sweep timing')
+        self.next_frame=start_frame;self.hold_frames=hold_frames
+        self.press_count=0;self.pressed=False;self.button=255
+
+    def state(self,frame):
+        while frame>=self.next_frame:
+            if self.pressed:
+                self.pressed=False
+                self.next_frame+=self.hold_frames*(1+(self.press_count-1)%3)
+            else:
+                self.button=BUTTON_STATES[('start','a')[self.press_count%2]]
+                self.next_frame+=self.hold_frames*(1<<(self.press_count%5))
+                self.press_count+=1;self.pressed=True
+        return self.button if self.pressed else 255
+
 def reads_joypad(cpu, memory):
     """Conservatively identify an instruction whose read address is FF00."""
     pc=cpu.pc;op=memory.read(pc)
@@ -45,6 +68,11 @@ def exploration_state_key(cpu):
                               memory.mbc1_mode,memory.cycles%70224))
     digest.update(struct.pack(">3I",memory.div_counter,memory.timer_reload_delay,
                               memory.timer_reloaded_this_cycle))
+    digest.update(struct.pack(">2H5B",
+                              256 if memory.dma_requested is None else memory.dma_requested,
+                              256 if memory.dma_starting is None else memory.dma_starting,
+                              memory.dma_active,memory.dma_source,memory.dma_index,
+                              memory.dma_phase,memory.joypad_state))
     digest.update(bytes([memory.stat_line]))
     for region in (memory.vram,memory.wram,memory.oam,memory.hram,memory.io,memory.eram):digest.update(region)
     return digest.digest()
@@ -569,15 +597,17 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
                   input_max_branches=128,input_max_depth=4,input_branch_steps=150_000,
                   input_max_steps=20_000_000,input_hold_frames=4,
                   input_snapshot_interval_frames=4,input_max_snapshots=1024,
-                  input_bridge_states_per_depth=8):
+                  input_bridge_states_per_depth=8,input_sweep_steps=0):
     if steps<=0:raise ValueError("steps must be positive")
     if auto_steps and (auto_max_steps<steps or (auto_chunk_steps is not None and auto_chunk_steps<=0) or auto_plateau_chunks<=0 or auto_min_new_blocks<=0):
         raise ValueError("invalid auto-step safety limits")
     if auto_inputs and min(input_max_branches,input_max_depth,input_branch_steps,input_max_steps,input_hold_frames,input_snapshot_interval_frames,input_max_snapshots,input_bridge_states_per_depth)<=0:
         raise ValueError("invalid automatic-input safety limits")
+    if input_sweep_steps<0 or (input_sweep_steps and not auto_inputs):
+        raise ValueError('input sweep requires --auto-inputs and a nonnegative budget')
     rom=rom_path.read_bytes();hits=collections.Counter();first={};observed=collections.defaultdict(collections.Counter);scenario_reports=[];dynamic_values=collections.defaultdict(set)
     observed_banks=collections.defaultdict(set)
-    input_candidates=[];candidate_keys=set();candidate_last_frame={}
+    input_candidates=[];candidate_keys=set();candidate_last_frame={};sweep_start=None
     def capture_input_state(cpu,memory,origin,target,depth=0,limit=None,interval=None):
         if not auto_inputs or not reads_joypad(cpu,memory):return
         frame=memory.cycles//70224;interval=input_snapshot_interval_frames if interval is None else interval
@@ -622,12 +652,14 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
             chunk=auto_chunk_steps or steps
         for offset,value in enumerate(memory.hram):dynamic_values[0xFF80+offset].add(value)
         scenario_reports.append({"name":scenario["name"],"blocks":len(scenario_keys),"steps_executed":total_steps,"coverage_growth":growth,"stop_reason":stop_reason,"end_pc":cpu.pc,"end_frame":memory.cycles//70224})
+        if input_sweep_steps and scenario_index==0:sweep_start=copy.deepcopy(cpu)
     exploration_report={"enabled":auto_inputs,"branches_executed":0,"steps_executed":0,
                         "limits":{"max_branches":input_max_branches,"max_depth":input_max_depth,
                                   "branch_steps":input_branch_steps,"max_steps":input_max_steps,
                                   "hold_frames":input_hold_frames,
                                   "snapshot_interval_frames":input_snapshot_interval_frames,
                                   "max_snapshots":input_max_snapshots,
+                                  "sweep_steps":input_sweep_steps,
                                   "bridge_states_per_depth":input_bridge_states_per_depth},
                         "initial_snapshots":len(input_candidates),"new_blocks":0,
                         "bridge_states_expanded":0,"stop_reason":"disabled","branches":[]}
@@ -638,6 +670,30 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
             roots=[input_candidates[index] for index in dict.fromkeys(indices)]
         else:roots=input_candidates
         queue=collections.deque(roots);exploration_keys=set();initial_blocks=len(first);bridge_counts=collections.Counter()
+        if input_sweep_steps:
+            cpu=sweep_start;memory=cpu.m;start_frame=memory.cycles//70224
+            policy=InputSweep(start_frame,input_hold_frames)
+            candidates=collections.deque(maxlen=min(16,input_max_snapshots))
+            limit=min(input_sweep_steps,input_max_steps);before=len(first)
+            print(f'auto-input sweep: up to {limit} steps within the input safety limit',flush=True)
+            for executed in range(1,limit+1):
+                memory.joypad_state=policy.state(memory.cycles//70224)
+                capture_input_state(cpu,memory,'sweep',candidates,0,interval=input_snapshot_interval_frames)
+                trace_step(cpu,memory,exploration_keys)
+                if executed%1_000_000==0:
+                    print(f'auto-input sweep: {executed} steps, +{len(first)-before} blocks, frame {memory.cycles//70224}',flush=True)
+            new_blocks=len(first)-before
+            exploration_report['branches_executed']=1
+            exploration_report['steps_executed']=limit
+            exploration_report['sweep_steps_executed']=limit
+            exploration_report['sweep_new_blocks']=new_blocks
+            exploration_report['branches'].append({'kind':'sweep','depth':0,'action':'varied-start-a',
+                'source_frame':start_frame,'steps':limit,'new_blocks':new_blocks,
+                'end_pc':cpu.pc,'end_bank':memory.rom_bank if 0x4000<=cpu.pc<0x8000 else 0,
+                'press_count':policy.press_count,'stop_reason':'input safety limit reached' if limit<input_sweep_steps else 'sweep instruction limit reached'})
+            # Continue ordinary exploration from recent progressed input states.
+            # Macro timing is discovery-only; native code still polls real pads.
+            for candidate in candidates:queue.appendleft(candidate)
         while queue and exploration_report["branches_executed"]<input_max_branches and exploration_report["steps_executed"]<input_max_steps:
             snapshot,depth,origin,snapshot_frame,snapshot_key=queue.popleft()
             for action_name,action_state in AUTO_INPUT_ACTIONS:
@@ -656,7 +712,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
                     print(f"auto-input branch {exploration_report['branches_executed']}: depth={depth} action={action_name} +{new_blocks} blocks",flush=True)
                     if depth<input_max_depth:
                         for candidate in reversed(local_candidates[-4:]):queue.appendleft(candidate)
-                elif depth<input_max_depth and origin.startswith("branch-") and local_candidates and bridge_counts[depth]<input_bridge_states_per_depth:
+                elif depth<input_max_depth and local_candidates and bridge_counts[depth]<input_bridge_states_per_depth:
                     # Some useful paths require a sequence of inputs where an
                     # intermediate press changes state but executes no new PC.
                     # Keep a small, depth-bounded quota of those bridge states;
@@ -898,8 +954,9 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
     emit_native_blocks(blocks,out)
     return blocks
 
-def emit_native_blocks(blocks,out,dispatch_format="auto"):
+def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None):
     """Emit validated block metadata without repeating reference discovery."""
+    if max_hot_chains is not None and max_hot_chains<0:raise ValueError('negative hot chain limit')
     used=sorted({b["family"] for b in blocks if not b["native_lowered"]})
     label=lambda b:f"L_gb_B{b['bank']:03X}_{b['pc']:04X}"
     block_by_key={(b["bank"],b["pc"]):b for b in blocks}
@@ -970,12 +1027,15 @@ def emit_native_blocks(blocks,out,dispatch_format="auto"):
     # gb_tick may redirect execution for an IRQ, so validate PC/bank before
     # entering the successor. Returns, JP (HL), mapper changes, and IRQ entry
     # continue through the general dispatcher below.
-    compact_targets={key for key in chain_targets if block_by_key[key]['hits']==0}
+    hot_candidates=sorted((key for key in chain_targets if block_by_key[key]['hits']>0),
+                          key=lambda key:(-block_by_key[key]['hits'],key))
+    hot_targets=set(hot_candidates if max_hot_chains is None else hot_candidates[:max_hot_chains])
+    compact_targets=chain_targets-hot_targets
     for bank,target in sorted(chain_targets):
         stem=f"B{bank:03X}_{target:04X}"
         if (bank,target) in compact_targets:
-            # Untraced static coverage can be large. Share the scheduler body
-            # rather than copying it into every cold instruction's edge stub.
+            # Static coverage and rarely visited paths can be large. Share
+            # the scheduler body without discarding any translated entries.
             # The 68000 return address is the native destination, not a GB
             # interpreter entry. No host temporary except d7 is live here.
             lines += [f"gb_chain_{stem}:",f"\tmove.w #${target:04X},d0",f"\tmove.w #${bank:04X},d1",
@@ -1046,12 +1106,13 @@ def emit_native_blocks(blocks,out,dispatch_format="auto"):
         "blocks":len(blocks),"chain_targets":len(chain_targets),
         "compact_chain_targets":len(compact_targets),
         "hot_chain_targets":len(chain_targets)-len(compact_targets),
+        "hot_chain_limit":max_hot_chains,
         "dispatch_format":"bank_page_table" if use_pages else "balanced_tree",
         "dispatch_pages":len(pages) if use_pages else 0,
         "dispatch_table_bytes":page_bytes if use_pages else 0},indent=2)+"\n")
     return blocks
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument("rom",type=pathlib.Path);p.add_argument("--out",type=pathlib.Path,default=pathlib.Path("build"));p.add_argument("--steps",type=int,default=100000);p.add_argument("--auto-steps",action="store_true");p.add_argument("--auto-max-steps",type=int,default=50_000_000);p.add_argument("--auto-chunk-steps",type=int);p.add_argument("--auto-plateau-chunks",type=int,default=3);p.add_argument("--auto-min-new-blocks",type=int,default=1);p.add_argument("--auto-inputs",action="store_true");p.add_argument("--input-max-branches",type=int,default=128);p.add_argument("--input-max-depth",type=int,default=4);p.add_argument("--input-branch-steps",type=int,default=150_000);p.add_argument("--input-max-steps",type=int,default=20_000_000);p.add_argument("--input-hold-frames",type=int,default=4);p.add_argument("--input-snapshot-interval-frames",type=int,default=4);p.add_argument("--input-max-snapshots",type=int,default=1024);p.add_argument("--input-bridge-states-per-depth",type=int,default=8);p.add_argument("--input-script",action="append",default=[],metavar="PULSES",help="merge a trace such as start@512:8,a@560:4");ns=p.parse_args()
-    blocks=compile_trace(ns.rom,ns.out,ns.steps,[parse_input_script(s) for s in ns.input_script],ns.auto_steps,ns.auto_max_steps,ns.auto_chunk_steps,ns.auto_plateau_chunks,ns.auto_min_new_blocks,ns.auto_inputs,ns.input_max_branches,ns.input_max_depth,ns.input_branch_steps,ns.input_max_steps,ns.input_hold_frames,ns.input_snapshot_interval_frames,ns.input_max_snapshots,ns.input_bridge_states_per_depth);print(f"wrote {len(blocks)} traced static blocks to {ns.out/'translated_trace.s'}")
+    p=argparse.ArgumentParser();p.add_argument("rom",type=pathlib.Path);p.add_argument("--out",type=pathlib.Path,default=pathlib.Path("build"));p.add_argument("--steps",type=int,default=100000);p.add_argument("--auto-steps",action="store_true");p.add_argument("--auto-max-steps",type=int,default=50_000_000);p.add_argument("--auto-chunk-steps",type=int);p.add_argument("--auto-plateau-chunks",type=int,default=3);p.add_argument("--auto-min-new-blocks",type=int,default=1);p.add_argument("--auto-inputs",action="store_true");p.add_argument("--input-max-branches",type=int,default=128);p.add_argument("--input-max-depth",type=int,default=4);p.add_argument("--input-branch-steps",type=int,default=150_000);p.add_argument("--input-max-steps",type=int,default=20_000_000);p.add_argument("--input-sweep-steps",type=int,default=0);p.add_argument("--input-hold-frames",type=int,default=4);p.add_argument("--input-snapshot-interval-frames",type=int,default=4);p.add_argument("--input-max-snapshots",type=int,default=1024);p.add_argument("--input-bridge-states-per-depth",type=int,default=8);p.add_argument("--input-script",action="append",default=[],metavar="PULSES",help="merge a trace such as start@512:8,a@560:4");ns=p.parse_args()
+    blocks=compile_trace(ns.rom,ns.out,ns.steps,[parse_input_script(s) for s in ns.input_script],ns.auto_steps,ns.auto_max_steps,ns.auto_chunk_steps,ns.auto_plateau_chunks,ns.auto_min_new_blocks,ns.auto_inputs,ns.input_max_branches,ns.input_max_depth,ns.input_branch_steps,ns.input_max_steps,ns.input_hold_frames,ns.input_snapshot_interval_frames,ns.input_max_snapshots,ns.input_bridge_states_per_depth,ns.input_sweep_steps);print(f"wrote {len(blocks)} traced static blocks to {ns.out/'translated_trace.s'}")
 if __name__ == "__main__":main()

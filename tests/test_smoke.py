@@ -50,6 +50,34 @@ def bitmask_dispatch_diagnostic_rom(mask=1):
     rom[0x1C0:0x1C7]=bytes.fromhex('3e99ea01c018fe')
     return bytes(rom)
 
+def input_sweep_diagnostic_rom():
+    """Original edge counter calls a WRAM pointer after three separate A presses."""
+    rom=bytearray(0x8000)
+    # B=count, C=previously held. The callback address is stored in RAM;
+    # neither a direct branch nor the ROM pointer-table recognizers seed it.
+    code=bytearray(bytes.fromhex('f33e10e00006000e002180017dea10c07cea11c0'))
+    loop=len(code);code.extend(bytes.fromhex('f000e601200079a720000e010478fe033800'))
+    release_jump=loop+5;held_jump=loop+9;count_jump=loop+17
+    code.extend(bytes.fromhex('2110c02a666fe9'))
+    released=len(code);code.extend(bytes.fromhex('0e001800'))
+    code[release_jump]=released-(release_jump+1)
+    code[held_jump]=(loop-(held_jump+1))&255
+    code[count_jump]=(loop-(count_jump+1))&255
+    code[-1]=(loop-len(code))&255
+    rom[0x100:0x100+len(code)]=code
+    rom[0x180:0x187]=bytes.fromhex('3e42ea00c018fe')
+    return bytes(rom)
+
+def root_bridge_diagnostic_rom():
+    """Original branchless latch: Start then A chooses a computed callback."""
+    rom=bytearray(0x8000)
+    rom[0x100:0x10C]=bytes.fromhex('f3afea00c03e10e000c31001')
+    code=bytes.fromhex('f0002fe60847fa00c0b0ea00c0f0002fe60147fa00c00f0f0fa08787878787478780c6406f2601e9')
+    rom[0x110:0x110+len(code)]=code
+    rom[0x140:0x143]=bytes.fromhex('c31001')
+    rom[0x1A0:0x1A7]=bytes.fromhex('3e42ea00c018fe')
+    return bytes(rom)
+
 def bank_shadow_diagnostic_rom(use_helper=True):
     """Original HRAM bank shadow and optional fixed-ROM bank setter."""
     rom=bytearray(0x10000);rom[0x147:0x14A]=bytes([1,1,0])
@@ -351,6 +379,63 @@ class SmokeTest(unittest.TestCase):
                     compiler.build(source,out,2,assembler=assembler)
             self.assertEqual(binary.read_bytes(),b'previous known build')
 
+    def test_profiled_hot_chain_quota_retains_every_native_entry(self):
+        import trace_recompiler as trace
+        rom=bytearray(0x8000);rom[0x100:0x104]=bytes.fromhex('040d18fc')
+        with tempfile.TemporaryDirectory() as d:
+            root=pathlib.Path(d);source=root/'quota.gb';source.write_bytes(rom)
+            blocks=trace.compile_trace(source,root/'out',15)
+            for block,hits in zip(blocks,(1,100,10)):block['hits']=hits
+            trace.emit_native_blocks(blocks,root/'out')
+            original=(root/'out'/'translated_trace.s').read_text()
+            trace.emit_native_blocks(blocks,root/'out',max_hot_chains=3)
+            self.assertEqual(original,(root/'out'/'translated_trace.s').read_text())
+            trace.emit_native_blocks(blocks,root/'out',max_hot_chains=1)
+            text=(root/'out'/'translated_trace.s').read_text()
+            report=json.loads((root/'out'/'native-codegen-report.json').read_text())
+            self.assertEqual((report['blocks'],report['hot_chain_targets'],report['compact_chain_targets']),(3,1,2))
+            hot=text.split('gb_chain_B000_0101:\n',1)[1].split('\n\ngb_chain_',1)[0]
+            self.assertIn('tst.b gb_force_tick',hot)
+            for pc in (0x100,0x101,0x102):self.assertIn(f'L_gb_B000_{pc:04X}:',text)
+            trace.emit_native_blocks(blocks,root/'out',max_hot_chains=1)
+            self.assertEqual(text,(root/'out'/'translated_trace.s').read_text())
+            with self.assertRaises(ValueError):trace.emit_native_blocks(blocks,root/'out',max_hot_chains=-1)
+
+    def test_native_layout_retries_without_retracing(self):
+        from unittest.mock import patch
+        import build_recompiled as compiler
+        rom=bytearray(0x8000);rom[0x100:0x104]=bytes.fromhex('040d18fc')
+        with tempfile.TemporaryDirectory() as d:
+            root=pathlib.Path(d);source=root/'quota.gb';source.write_bytes(rom)
+            assembler=root/'assembler';assembler.touch();calls=[]
+            def assemble(command,**kwargs):
+                calls.append(command)
+                pathlib.Path(command[-1]).write_bytes(bytes(0x400002 if len(calls)==1 else 0x80000))
+            discover=compiler.compile_trace
+            with patch.object(compiler,'compile_trace',wraps=discover) as traced,patch.object(compiler.subprocess,'run',side_effect=assemble):
+                binary=compiler.build(source,root/'out',15,assembler=assembler)
+            self.assertEqual(traced.call_count,1)
+            self.assertEqual(len(calls),2)
+            self.assertEqual(binary.stat().st_size,0x80000)
+            report=json.loads((root/'out'/'build-report.json').read_text())
+            self.assertEqual([a['hot_chain_targets'] for a in report['native_layout_attempts']],[3,1])
+            self.assertEqual(report['blocks'],3)
+
+    def test_native_layout_all_compact_failure_preserves_rom(self):
+        from unittest.mock import patch
+        import build_recompiled as compiler
+        rom=bytearray(0x8000);rom[0x100:0x104]=bytes.fromhex('040d18fc')
+        with tempfile.TemporaryDirectory() as d:
+            root=pathlib.Path(d);source=root/'quota.gb';source.write_bytes(rom)
+            assembler=root/'assembler';assembler.touch();out=root/'out';out.mkdir()
+            binary=out/'recompiled.md';binary.write_bytes(b'preserved');calls=[]
+            def assemble(command,**kwargs):
+                calls.append(command);pathlib.Path(command[-1]).write_bytes(bytes(0x400002))
+            with patch.object(compiler.subprocess,'run',side_effect=assemble):
+                with self.assertRaisesRegex(ValueError,'4 MiB'):compiler.build(source,out,15,assembler=assembler)
+            self.assertEqual(len(calls),3) #3 ->1 ->0 duplicated scheduler stubs
+            self.assertEqual(binary.read_bytes(),b'preserved')
+
     def test_bank_context_closure_discovers_following_call(self):
         import trace_recompiler as trace
         from gb_cpu import CPU,Memory
@@ -484,9 +569,9 @@ class SmokeTest(unittest.TestCase):
         def force_compact(*args,**kwargs):
             blocks=discover(*args,**kwargs)
             # Exercise the compact edges even for paths the reference ran.
-            for block in blocks:block['hits']=0
-            emit_native_blocks(blocks,args[1],dispatch_format='paged');return blocks
+            emit_native_blocks(blocks,args[1],dispatch_format='paged',max_hot_chains=2 if name=='mixed-irq' else 0);return blocks
         for name,fixture,expected in (('irq',stat_diagnostic_rom,[0x42,0x77,0]),
+                                      ('mixed-irq',stat_diagnostic_rom,[0x42,0x77,0]),
                                       ('mapper',bank_switch_diagnostic_rom,[0x42,0,0]),
                                       ('mbc5-zero',lambda:bank_switch_diagnostic_rom(0x19,0),[0x42,0,0])):
             with self.subTest(name=name),tempfile.TemporaryDirectory() as d:
@@ -529,16 +614,25 @@ class SmokeTest(unittest.TestCase):
     def test_native_static_dispatch_discovery(self):
         from build_recompiled import build
         from run_compat_tests import _run_in_pty,_blastem_values
-        for name,fixture in (('hl-table',hl_dispatch_diagnostic_rom),('bank-call',constant_bank_call_diagnostic_rom),('bank-table',banked_table_diagnostic_rom),('bank-context',bank_context_diagnostic_rom),('bank-shadow',bank_shadow_diagnostic_rom),('inline-hl',inline_hl_table_diagnostic_rom),('upper-rom-table',rom_only_upper_table_diagnostic_rom),('bitmask',bitmask_dispatch_diagnostic_rom),('large-static',large_dispatch_diagnostic_rom),('long-table',long_banked_table_diagnostic_rom),('last-table-entry',lambda:long_banked_table_diagnostic_rom(127))):
+        for name,fixture in (('hl-table',hl_dispatch_diagnostic_rom),('bank-call',constant_bank_call_diagnostic_rom),('bank-table',banked_table_diagnostic_rom),('bank-context',bank_context_diagnostic_rom),('bank-shadow',bank_shadow_diagnostic_rom),('inline-hl',inline_hl_table_diagnostic_rom),('upper-rom-table',rom_only_upper_table_diagnostic_rom),('bitmask',bitmask_dispatch_diagnostic_rom),('input-sweep',input_sweep_diagnostic_rom),('root-bridge',root_bridge_diagnostic_rom),('large-static',large_dispatch_diagnostic_rom),('long-table',long_banked_table_diagnostic_rom),('last-table-entry',lambda:long_banked_table_diagnostic_rom(127))):
             with self.subTest(name=name),tempfile.TemporaryDirectory() as d:
                 root=pathlib.Path(d);source=root/'original.gb';source.write_bytes(fixture())
-                build(source,root/'out',2)
+                options=dict(auto_inputs=True,input_max_branches=1,input_max_steps=600_000,input_sweep_steps=600_000,input_hold_frames=1) if name=='input-sweep' else {}
+                if name=='root-bridge':options=dict(auto_inputs=True,input_max_branches=192,input_max_depth=2,input_branch_steps=12000,input_max_steps=2_304_000,input_hold_frames=1,input_snapshot_interval_frames=1,input_max_snapshots=8)
+                build(source,root/'out',500 if name=='root-bridge' else 2,**options)
                 commands='frames 600\np/x [$ff2300].b [$ff2301].b [$ff0018].l\nquit\n'
+                if name in ('input-sweep','root-bridge'):
+                    # Wait for live input: discovery pulses are never playback.
+                    buttons=('start','b') if name=='root-bridge' else ('b',)*3
+                    pulses=''.join(f'binddown "gamepads.1.{button}"\nframes 10\nbindup "gamepads.1.{button}"\nframes 10\n' for button in buttons)
+                    commands=('frames 600\np/x [$ff2300].b\n'+pulses+
+                        'frames 30\np/x [$ff2300].b [$ff2301].b [$ff0018].l\nquit\n')
                 code,output,timed=_run_in_pty([os.environ['GB2MD_BLASTEM'],'-d',str(root/'out'/'recompiled.md')],commands,30)
                 values=_blastem_values(output)
                 self.assertFalse(timed,output);self.assertEqual(code,0,output)
                 self.assertEqual([values.get(a) for a in ('FF2300.b','FF0018.l')],[0x42,0],output)
                 if name=='bitmask':self.assertEqual(values.get('FF2301.b'),0x99,output)
+                if name in ('input-sweep','root-bridge'):self.assertRegex(output,r'(?i)\[\$ff2300\]\.b:\s+0\b')
 
     @unittest.skipUnless(os.environ.get('GB2MD_NATIVE_TESTS')=='1','opt-in external BlastEm integration')
     def test_native_joypad_selected_rows(self):
@@ -1126,6 +1220,60 @@ class SmokeTest(unittest.TestCase):
             self.assertTrue(all("bytes" in block and "operand" in block and "bank" in block for block in blocks))
             self.assertTrue(any(block["native_lowered"] for block in blocks))
 
+    def test_input_snapshot_key_distinguishes_dma_and_held_input(self):
+        import copy
+        from gb_cpu import CPU,Memory
+        from trace_recompiler import exploration_state_key
+        cpu=CPU(Memory(bytes(0x8000)));baseline=exploration_state_key(cpu)
+        # Identical memory bytes can have different next bus reads or JOYP
+        # results because DMA and held buttons are state outside those bytes.
+        for name,value in (('dma_requested',0),('dma_starting',0),
+                           ('dma_active',True),('dma_source',0xC0),
+                           ('dma_index',1),('dma_phase',1),('joypad_state',0x7F)):
+            changed=copy.deepcopy(cpu);setattr(changed.m,name,value)
+            with self.subTest(field=name):
+                self.assertNotEqual(baseline,exploration_state_key(changed))
+        self.assertEqual(baseline,exploration_state_key(copy.deepcopy(cpu)))
+
+    def test_input_sweep_varies_holds_and_releases_deterministically(self):
+        from trace_recompiler import InputSweep
+        one=InputSweep(10,1);two=InputSweep(10,1)
+        states=[one.state(frame) for frame in range(250)]
+        self.assertEqual(states,[two.state(frame) for frame in range(250)])
+        self.assertEqual(states[:10],[255]*10)
+        self.assertEqual(set(states),{0x7F,0xEF,255})
+        lengths=[];length=1
+        for previous,current in zip(states[10:],states[11:]):
+            if previous==current:length+=1
+            else:lengths.append(length);length=1
+        self.assertGreater(len(set(lengths)),3)
+        for args in ((-1,1),(0,0)):
+            with self.assertRaises(ValueError):InputSweep(*args)
+
+    def test_input_sweep_discovers_ram_callback_and_obeys_total_budget(self):
+        import trace_recompiler as trace
+        rom=input_sweep_diagnostic_rom()
+        with tempfile.TemporaryDirectory() as d:
+            root=pathlib.Path(d);source=root/'sweep.gb';source.write_bytes(rom)
+            plain=trace.compile_trace(source,root/'plain',200)
+            self.assertNotIn((0,0x180),{(b['bank'],b['pc']) for b in plain})
+            blocks=trace.compile_trace(source,root/'sweep',200,auto_inputs=True,
+                input_max_branches=1,input_sweep_steps=600_000,
+                input_max_steps=600_000,input_hold_frames=1,input_max_snapshots=8)
+            self.assertIn((0,0x180),{(b['bank'],b['pc']) for b in blocks})
+            report=json.loads((root/'sweep'/'trace-profile.json').read_text())
+            self.assertEqual(report['total_steps_executed'],600_200)
+            exploration=report['input_exploration']
+            self.assertEqual(exploration['branches_executed'],1)
+            self.assertEqual(exploration['sweep_steps_executed'],600_000)
+            self.assertIn('instruction limit',exploration['stop_reason'])
+            trace.compile_trace(source,root/'capped',200,auto_inputs=True,
+                input_sweep_steps=600_000,input_max_steps=50,input_max_branches=1)
+            capped=json.loads((root/'capped'/'trace-profile.json').read_text())
+            self.assertEqual(capped['input_exploration']['steps_executed'],50)
+            with self.assertRaises(ValueError):
+                trace.compile_trace(source,root/'invalid',200,input_sweep_steps=1)
+
     def test_auto_step_stop_policy(self):
         import trace_recompiler as trace
         self.assertIsNone(trace.auto_stop_reason(200,1000,[4,0,0],3,1))
@@ -1232,6 +1380,26 @@ class SmokeTest(unittest.TestCase):
                 self.assertIn((0,0x128),{(b["bank"],b["pc"]) for b in blocks})
         finally:
             trace.AUTO_INPUT_ACTIONS=old_actions
+
+    def test_auto_inputs_keeps_non_novel_initial_root_bridges(self):
+        from unittest.mock import patch
+        import trace_recompiler as trace
+        with tempfile.TemporaryDirectory() as d:
+            root=pathlib.Path(d);source=root/'root-bridge.gb';source.write_bytes(root_bridge_diagnostic_rom())
+            plain=trace.compile_trace(source,root/'plain',500)
+            self.assertNotIn((0,0x1A0),{(b['bank'],b['pc']) for b in plain})
+            # Neither individual input executes a novel PC from the initial
+            # state. Dropping root bridges loses their useful RAM-state change.
+            actions=[('start',trace.BUTTON_STATES['start']),('a',trace.BUTTON_STATES['a'])]
+            with patch.object(trace,'AUTO_INPUT_ACTIONS',actions):
+                blocks=trace.compile_trace(source,root/'explored',500,auto_inputs=True,
+                    input_max_branches=12,input_max_depth=2,input_branch_steps=12000,
+                    input_max_steps=144000,input_hold_frames=1,
+                    input_snapshot_interval_frames=1,input_max_snapshots=8)
+            report=json.loads((root/'explored'/'trace-profile.json').read_text())['input_exploration']
+            self.assertEqual(report['branches'][0]['new_blocks'],0)
+            self.assertGreater(report['bridge_states_expanded'],0)
+            self.assertIn((0,0x1A0),{(b['bank'],b['pc']) for b in blocks})
 
     def test_static_closure_resolves_bounded_rom_pointer_table(self):
         import trace_recompiler as trace

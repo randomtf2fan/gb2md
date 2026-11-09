@@ -43,6 +43,9 @@ class GuiHelpersTest(unittest.TestCase):
             self.assertEqual(window.input_branches.value(),128)
             self.assertEqual(window.input_depth.value(),4)
             self.assertEqual(window.input_max_steps.value(),20_000_000)
+            self.assertEqual(window.input_sweep_steps.value(),0)
+            window.auto_inputs.setChecked(False)
+            self.assertFalse(window.input_sweep_steps.isEnabled())
         finally:
             window.close()
 
@@ -73,6 +76,11 @@ class GuiHelpersTest(unittest.TestCase):
             self.assertEqual(auto_arguments[-3:], ["--auto-steps", "--auto-max-steps", "9999"])
             _, input_arguments = compiler_command(resolved_rom, resolved_output, 1234, auto_inputs=True, input_max_branches=17, input_max_depth=3, input_max_steps=999)
             self.assertEqual(input_arguments[-7:], ["--auto-inputs", "--input-max-branches", "17", "--input-max-depth", "3", "--input-max-steps", "999"])
+            _, sweep_arguments=compiler_command(resolved_rom,resolved_output,1234,
+                auto_inputs=True,input_max_steps=1000,input_sweep_steps=700)
+            self.assertEqual(sweep_arguments[-2:],["--input-sweep-steps","700"])
+            with self.assertRaises(ValueError):
+                compiler_command(resolved_rom,resolved_output,1234,input_sweep_steps=700)
 
     def test_rejects_wrong_extension(self):
         with tempfile.TemporaryDirectory() as folder:

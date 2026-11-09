@@ -49,6 +49,14 @@ chose a custom destination.
 The current GUI/build checks were run on Linux (Manjaro). Windows packaging
 and emulator integration have not been verified in this update.
 
+For programs needing longer input sequences, the optional **Long input sweep**
+GUI setting alternates Start/A with varied holds and releases during discovery.
+It is off by default. Its steps come from **Input safety limit**, so increase
+that limit when reserving time for both the sweep and short branches. The CLI
+uses `--auto-inputs --input-sweep-steps N --input-max-steps TOTAL`.
+This heuristic can discover RAM-loaded callbacks, but does not prove complete
+coverage or guarantee gameplay. Generated ROMs always use live controller input.
+
 ## Controller mapping
 
 GB2MD reads Genesis controller port 1. With BlastEm's default keyboard bindings:
@@ -84,7 +92,7 @@ all obligations are reviewed. BlastEm is optional and likewise treated as an
 external local test dependency.
 
 The `test_roms/` collection and all input `.gb`/`.gbc` files are local fixtures
-and are ignored by the repository safety rules. The 114 focused unit tests use
+and are ignored by the repository safety rules. The 121 focused unit tests use
 synthetic data and do not require commercial ROMs. Compatibility-suite runs
 require the user to supply the relevant test ROMs separately.
 
@@ -102,8 +110,10 @@ and return trampoline; exact input-bit dispatchers include return/callback
 pairs. Recognized bank/address tables have a 128-entry bound derived from the
 helper arithmetic and report truncation. These improve coverage but do not
 guarantee that every computed jump is discovered. Cold native scheduler stubs
-share code to reduce output size. Images exceeding the supported 4 MiB cartridge layout
-fail compilation before replacing an existing `recompiled.md`.
+share code to reduce output size. If an image exceeds the supported 4 MiB
+layout, the builder tries profile-ranked compact scheduler stubs while retaining
+every translated entry. If it still cannot fit, compilation fails before
+replacing an existing `recompiled.md`. Larger cartridge mapping is unsupported.
 
 Dense programs can use a bank/page native dispatch table; small or sparse
 programs retain the decision tree automatically. An original dispatch-heavy
