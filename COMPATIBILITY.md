@@ -1,6 +1,66 @@
 # GB2MD compatibility status
 
 
+
+## General native CPU validation and writable code — 2026-11-09
+
+This pass focuses on reusable CPU-test infrastructure rather than any game.
+An optional `--test-serial` build now pairs diagnostic reference tracing with a
+native instantaneous serial receiver. The compatibility runner enables it for
+Blargg serial fixtures and observes the actual native message in BlastEm.
+Normal builds and the GUI leave it disabled. This is a diagnostic link peer,
+not hardware-accurate serial timing or serial-interrupt support.
+
+Blargg `08-misc instrs` initially failed compilation because the native emitter
+only handled multiple observed code variants in OAM/HRAM. Finite WRAM/echo-RAM
+variants now each get native bodies and byte-match selection; unknown variants
+trap, and cross-window multi-variant instructions are rejected. Original
+fixtures verify WRAM, echo aliasing and an intentionally unseen variant trap.
+Arbitrary self-modifying code and unobserved RAM entry points remain incomplete.
+
+Current independently observed CPU results (all listed cases pass Python):
+
+| Blargg individual ROM | Native Genesis | Detail |
+|---|---|---|
+| 01-special | PASS | Native diagnostic serial Passed |
+| 03-op sp,hl | PASS | Native diagnostic serial Passed |
+| 06-ld r,r | PASS | Native diagnostic serial Passed |
+| 07-jr,jp,call,ret,rst | PASS | Native diagnostic serial Passed |
+| 08-misc instrs | PASS | Previously compilation FAIL; fixed WRAM variant support |
+| 02-interrupts | FAIL | Missing native RAM entry `$C1B9`; root cause still unresolved |
+
+The interrupt trap does not prove that more steps alone will fix it; an
+underlying execution difference could enter an untraced reporting path.
+The remaining five individual CPU tests are NOT_RUN natively in this pass.
+Across the six tested ROMs: five native PASS and one native FAIL; all six
+fresh Python runs pass.
+Python-only results from earlier sections remain distinct.
+
+The native observer rejects uninstrumented builds, invalid/truncated buffers,
+overflow, emulator failures and missing-block traps. Native failures now give
+the runner a nonzero exit code. Original native serial fixtures produce both
+Passed and Failed and exercise the busy-wait completion path. The buffer has a
+512-byte safety limit and mode selection is recorded in reports.
+
+**160/160 tests PASS with native integration enabled** (151 ordinary and nine
+opt-in native methods), completed in385 seconds. The public fast suite passes
+151 with nine native methods skipped. With instrumentation disabled,14 timer/reg_f images are byte-
+identical to the earlier verified native binaries, and the preserved Tetris
+metadata emits byte-identical assembly with its original tree dispatcher.
+The GUI's actual build and cancellation checks pass. No commercial ROMs,
+generated game assembly, test ROM binaries or trace files are published.
+
+Reproduce a supported native serial check with external vasm and BlastEm:
+
+```sh
+python3 run_compat_tests.py 'test_roms/blargg/cpu_instrs/individual/08-misc instrs.gb' \
+  --max-steps 400000 --compile-native --native-steps 400000 \
+  --run-native-blastem --blastem /path/to/blastem --native-frames 3600 \
+  --native-timeout 75 --native-output compat-builds/blargg-serial \
+  --json compat-results/blargg-native-serial.json
+```
+
+
 ## Indexed callbacks and additional native room progression — 2026-11-09
 
 **150/150 tests PASS with native integration enabled** (143 ordinary and
@@ -95,7 +155,8 @@ and five opt-in native methods. Fresh frontend traces, builds and documented
 protocol checks also pass **14/14 Mooneye timer/reg_f cases in both Python and
 native BlastEm execution**. Extra native checks verify callback return writes
 and restored ROM-bank data. CPU, timer, DMA and Genesis runtime sources are
-unchanged. Native Blargg serial observation and broader PPU/DMA reruns remain open.
+unchanged. Native Blargg serial observation was open at this historical milestone;
+the current matrix above supersedes that limitation. Broader PPU/DMA reruns remain open.
 
 Pokémon's former `$03:$7113` target is entry 65 of a bank/address table whose
 reader stopped at 64. The verified helper's aligned byte-index range supports
@@ -543,8 +604,9 @@ case.
 - DMG-acid2 and all screenshot-only tests; image comparison is not implemented.
 - CGB-only ROMs, which are reported as UNSUPPORTED rather than attempted as DMG.
 - Gambatte, GBMicrotest, SameSuite, AGE, Mealybug, RTC/MBC and audio suites.
-- Native Blargg serial results; the Genesis runtime has no automated serial
-  output observer, so Python PASS is never copied into the native column.
+- Native Blargg cases beyond the five explicit passes in the current matrix.
+  The diagnostic serial observer is implemented; full serial hardware behavior
+  remains unsupported. Python results are never copied into the native column.
 
 ## Reproduction
 

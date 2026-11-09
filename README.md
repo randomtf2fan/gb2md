@@ -92,11 +92,11 @@ all obligations are reviewed. BlastEm is optional and likewise treated as an
 external local test dependency.
 
 The `test_roms/` collection and all input `.gb`/`.gbc` files are local fixtures
-and are ignored by the repository safety rules. The 143 focused unit tests use
+and are ignored by the repository safety rules. The 151 focused unit tests use
 synthetic data and do not require commercial ROMs. Compatibility-suite runs
 require the user to supply the relevant test ROMs separately.
 
-Seven additional native integration methods use original diagnostic ROMs
+Nine additional native integration methods use original diagnostic ROMs
 generated from test source: controller rows, static dispatch discovery, compact
 scheduler interrupt/mapper paths, missing dispatch slots/pages/banks, and
 far-call bank restoration, indexed record/RAM callbacks and preserving indexed calls. Enable them with `GB2MD_NATIVE_TESTS=1`, `GB2MD_BLASTEM=/path/to/blastem` and
@@ -311,3 +311,11 @@ and [NOTICE.md](NOTICE.md). External tools, GUI frameworks, test suites, ROMs,
 game data, and trademarks remain under their respective owners' terms. See
 [THIRD_PARTY.md](THIRD_PARTY.md). This project is not affiliated with Nintendo
 or Sega.
+
+For compatibility tests, `run_compat_tests.py --compile-native
+--run-native-blastem` now observes supported Mooneye and Blargg serial protocols.
+Blargg builds use an explicit diagnostic instantaneous serial peer, not a full
+hardware serial implementation. The standalone `--test-serial` build option is
+for diagnostics only and is disabled in normal builds and the GUI. Finite
+observed WRAM/echo code variants are now compiled natively; unknown variants
+still trap and arbitrary self-modifying code is not fully supported.

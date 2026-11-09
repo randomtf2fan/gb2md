@@ -2,8 +2,8 @@
 """Run immutable Game Boy compatibility ROMs against GB2MD's Python oracle.
 
 The runner deliberately keeps Python and native-Genesis results separate.  A
-ROM that passes the reference core is never reported as a native pass unless a
-future native backend has actually observed the target protocol on Genesis.
+ROM that passes the reference core is never reported as a native pass unless
+the native observer actually sees its supported protocol in BlastEm.
 """
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ from typing import Iterable
 
 from gb2md import CARTRIDGES, cartridge_profile
 from gb_cpu import CPU, Memory
+from serial_test import SerialTestMemory, SERIAL_CAPACITY, SERIAL_COUNT_ADDRESS, SERIAL_OVERFLOW_ADDRESS, SERIAL_BUFFER_BASE
 
 STATUSES = ("PASS", "FAIL", "TIMEOUT", "UNSUPPORTED", "NOT_RUN")
 ROM_SUFFIXES = {".gb", ".gbc"}
@@ -31,7 +32,7 @@ MOONEYE_PASS = (3, 5, 8, 13, 21, 34)
 MOONEYE_FAIL = (0x42,) * 6
 
 
-class ProtocolMemory(Memory):
+class ProtocolMemory(SerialTestMemory):
     """Memory with an instantaneous external serial receiver.
 
     Compatibility ROMs commonly write a byte to SB ($FF01), then write $81 to
@@ -41,16 +42,12 @@ class ProtocolMemory(Memory):
 
     def __init__(self, rom: bytes):
         super().__init__(rom)
-        self.serial = bytearray()
         self.dma_writes = 0
 
     def write(self, address, value, bus_phase=0):
         super().write(address, value, bus_phase=bus_phase)
         if (address & 0xFFFF) == 0xFF46:
             self.dma_writes += 1
-        if (address & 0xFFFF) == 0xFF02 and (value & 0x81) == 0x81:
-            self.serial.append(self.io[0x01])
-            self.io[0x02] = value & 0x7F
 
 
 def discover_roms(root: Path, selections: Iterable[Path], suite: str | None):
@@ -293,7 +290,7 @@ def compile_native(result, path: Path, output_root: Path, steps: int):
     output = output_root / result["sha256"][:16]
     try:
         from build_recompiled import build
-        artifact = build(path, output, steps=steps)
+        artifact = build(path, output, steps=steps, test_serial=result["protocol"]=="blargg_serial")
         report_path = output / "build-report.json"
         build_report = json.loads(report_path.read_text()) if report_path.exists() else None
         result["native_genesis"] = {
@@ -347,12 +344,16 @@ def _run_in_pty(command, input_text: str, timeout: int):
 
 
 def run_native_blastem(result, source: Path, blastem: Path, frames: int, timeout: int):
-    """Observe a Mooneye terminal signature through BlastEm's debugger."""
+    """Observe an explicit supported test protocol, independently of Python."""
     native = result["native_genesis"]
     if native.get("build_status") != "BUILT":
         return
-    if result["protocol"] != "mooneye_fibonacci":
+    serial=result["protocol"]=="blargg_serial"
+    if result["protocol"] not in ("mooneye_fibonacci","blargg_serial"):
         native["detail"] = "native ROM assembled; this protocol has no automated BlastEm observer"
+        return
+    if serial and not (native.get("build_report") or {}).get("test_serial"):
+        native["detail"]="native serial observation requires an explicitly instrumented --test-serial build"
         return
     commands = (
         f"frames {frames}\n"
@@ -361,11 +362,18 @@ def run_native_blastem(result, source: Path, blastem: Path, frames: int, timeout
         "[$ff000e].b [$ff000f].b [$ff0010].w "
         "[$ff0018].l [$ff0038].l [$ff0020].l\nquit\n"
     )
+    if serial:
+        addresses=["ffc600.w","ffc602.b"]+[f"{SERIAL_BUFFER_BASE+offset:06x}.l" for offset in range(0,SERIAL_CAPACITY,4)]
+        dump="".join("p/x "+" ".join("[$"+address.split('.')[0]+"]."+address.split('.')[1] for address in addresses[start:start+16])+"\n" for start in range(0,len(addresses),16))
+        commands=commands.replace("quit\n",dump+"quit\n")
     returncode, output, timed_out = _run_in_pty(
         [str(blastem.resolve()), "-d", str(Path(native["artifact"]).resolve())], commands, timeout
     )
     if timed_out:
         native.update(status="TIMEOUT", category="emulator_timeout", detail=f"BlastEm exceeded {timeout} seconds")
+        return
+    if returncode!=0:
+        native.update(status="FAIL",category="emulator_exit",detail=f"BlastEm exited with code {returncode}")
         return
     values = _blastem_values(output)
     register_addresses = ("FF000A.b", "FF000B.b", "FF000C.b", "FF000D.b", "FF000E.b", "FF000F.b")
@@ -380,10 +388,29 @@ def run_native_blastem(result, source: Path, blastem: Path, frames: int, timeout
         "frames": frames, "exit_code": returncode,
         "observed_memory": values, "terminal_jr_loop": terminal_loop,
     }
+    if serial:
+        count=values.get(SERIAL_COUNT_ADDRESS)
+        raw=bytearray()
+        for offset in range(0,SERIAL_CAPACITY,4):
+            value=values.get(f"{SERIAL_BUFFER_BASE+offset:06X}.l")
+            if value is None:break
+            raw.extend(value.to_bytes(4,"big"))
+        native['serial_output']=bytes(raw[:count or 0]).decode('ascii','replace')
     if values.get("FF0018.l")==0xBADB10C0 or values.get("FF0038.l",0)>0:
         location=f"bank ${bank:04X} PC ${pc:04X}" if bank is not None and pc is not None else "unknown bank/PC"
         native.update(status="FAIL",category="missing_native_block",
                       detail=f"Missing native block at {location}; increase trace/discovery coverage")
+    elif serial:
+        if count is None or count>SERIAL_CAPACITY or count>len(raw) or values.get(SERIAL_OVERFLOW_ADDRESS) is None:
+            native.update(status="FAIL",category="observer",detail="Missing or invalid diagnostic serial buffer")
+        elif values[SERIAL_OVERFLOW_ADDRESS]:
+            native.update(status="FAIL",category="observer_overflow",detail="Diagnostic serial buffer overflowed; no protocol result accepted")
+        elif b"Failed" in raw[:count]:
+            native.update(status="FAIL",category="protocol",detail="Native serial output contains Failed")
+        elif b"Passed" in raw[:count]:
+            native.update(status="PASS",category="protocol",detail="Native diagnostic serial output contains Passed (instantaneous test peer)")
+        else:
+            native.update(status="TIMEOUT",category="protocol",detail="No native serial completion message within frame limit")
     elif registers == MOONEYE_PASS and terminal_loop:
         native.update(status="PASS", category="protocol", detail="BlastEm observed Fibonacci registers in the terminal JR loop")
     elif registers == MOONEYE_FAIL and terminal_loop:
@@ -417,7 +444,7 @@ def main(argv=None):
     parser.add_argument("--max-frames", type=int, default=None)
     parser.add_argument("--loop-threshold", type=int, default=65_536)
     parser.add_argument("--json", type=Path, default=Path("compat-results/report.json"))
-    parser.add_argument("--compile-native", action="store_true", help="assemble Python-passing ROMs; execution remains NOT_RUN")
+    parser.add_argument("--compile-native", action="store_true", help="assemble Python-passing ROMs; remain NOT_RUN unless a native observer is requested")
     parser.add_argument("--native-steps", type=int, default=None, help="trace steps per native build (defaults to --max-steps)")
     parser.add_argument("--native-output", type=Path, default=Path("compat-results/native-builds"))
     parser.add_argument("--run-native-blastem", action="store_true", help="open BlastEm and verify supported native protocols")
@@ -464,7 +491,7 @@ def main(argv=None):
     native = report["native_summary"]
     print("Native Genesis: " + ", ".join(f"{key}={value}" for key, value in sorted(native.items())))
     print(f"JSON: {args.json}")
-    return 1 if summary["FAIL"] else 0
+    return 1 if summary["FAIL"] or native.get("FAIL",0) else 0
 
 
 if __name__ == "__main__":

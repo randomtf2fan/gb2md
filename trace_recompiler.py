@@ -13,6 +13,7 @@ from lr35902_lowering import family
 from gb2md import instruction_length
 from bank_analysis import fixed_bank_context_targets
 from ram_callback_analysis import RamCallbackAnalyzer
+from serial_test import SerialTestMemory
 
 REGS=("gb_b","gb_c","gb_d","gb_e","gb_h","gb_l",None,"gb_a")
 REGS16=("gb_b","gb_d","gb_h","gb_sp")
@@ -622,7 +623,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
                   input_max_branches=128,input_max_depth=4,input_branch_steps=150_000,
                   input_max_steps=20_000_000,input_hold_frames=4,
                   input_snapshot_interval_frames=4,input_max_snapshots=1024,
-                  input_bridge_states_per_depth=8,input_sweep_steps=0):
+                  input_bridge_states_per_depth=8,input_sweep_steps=0,test_serial=False):
     if steps<=0:raise ValueError("steps must be positive")
     if auto_steps and (auto_max_steps<steps or (auto_chunk_steps is not None and auto_chunk_steps<=0) or auto_plateau_chunks<=0 or auto_min_new_blocks<=0):
         raise ValueError("invalid auto-step safety limits")
@@ -654,7 +655,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
             first.setdefault(key,raw);scenario_keys.add(key)
     scenarios=[{"name":"no-input","events":[]}]+list(input_scenarios or [])
     for scenario_index,scenario in enumerate(scenarios):
-        memory=Memory(rom);cpu=CPU(memory);scenario_keys=set();applied_memory_events=set()
+        memory=SerialTestMemory(rom) if test_serial else Memory(rom);cpu=CPU(memory);scenario_keys=set();applied_memory_events=set()
         total_steps=0;growth=[];stop_reason="fixed step budget reached";chunk=steps
         while True:
             before=len(scenario_keys);run_steps=min(chunk,(auto_max_steps-total_steps) if auto_steps else chunk)
@@ -1017,7 +1018,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
                 block["idle_wait"]=True
     for block in blocks:block["native_lowered"]=native_body(block) is not None
     out.mkdir(parents=True,exist_ok=True)
-    (out/"trace-profile.json").write_text(json.dumps({"input":str(rom_path),"steps_per_scenario":steps,"auto_steps":auto_steps,"auto_inputs":auto_inputs,"total_steps_executed":sum(s["steps_executed"] for s in scenario_reports),"dynamic_unique_blocks":dynamic_unique_block_count,"indirect_table_targets":len(indirect_table_targets),"hl_pointer_table_targets":len(hl_table_targets),"bitmask_dispatch_targets":len(bitmask_targets),"rst_inline_table_targets":len(rst_table_targets),"banked_thunk_targets":len(banked_thunk_targets),"constant_bank_call_targets":len(constant_bank_targets),"constant_far_call_targets":len(far_call_targets),"constant_far_call_returns":len(far_call_returns),"banked_pointer_table_targets":len(far_table_targets),"banked_pointer_tables":far_table_reports,"bank_context_targets":len(bank_context_targets),"indexed_call_targets":len(indexed_call_targets),"indexed_call_returns":len(indexed_call_returns),"indexed_call_tables":indexed_call_reports,"ram_callback_targets":len(ram_callback_targets),"ram_callback_returns":len(ram_callback_returns),"ram_callback_records":ram_callback_report.get("records",[]),"ram_callback_analysis_limits":{"pair_limit_reached":ram_callback_report.get("pair_limit_reached",False),"exhausted_contexts":ram_callback_report.get("exhausted_contexts",[])},"total_blocks_after_static_closure":len(blocks),"input_exploration":exploration_report,"scenarios":scenario_reports,"blocks":blocks},indent=2)+"\n")
+    (out/"trace-profile.json").write_text(json.dumps({"input":str(rom_path),"steps_per_scenario":steps,"auto_steps":auto_steps,"auto_inputs":auto_inputs,"test_serial":test_serial,"total_steps_executed":sum(s["steps_executed"] for s in scenario_reports),"dynamic_unique_blocks":dynamic_unique_block_count,"indirect_table_targets":len(indirect_table_targets),"hl_pointer_table_targets":len(hl_table_targets),"bitmask_dispatch_targets":len(bitmask_targets),"rst_inline_table_targets":len(rst_table_targets),"banked_thunk_targets":len(banked_thunk_targets),"constant_bank_call_targets":len(constant_bank_targets),"constant_far_call_targets":len(far_call_targets),"constant_far_call_returns":len(far_call_returns),"banked_pointer_table_targets":len(far_table_targets),"banked_pointer_tables":far_table_reports,"bank_context_targets":len(bank_context_targets),"indexed_call_targets":len(indexed_call_targets),"indexed_call_returns":len(indexed_call_returns),"indexed_call_tables":indexed_call_reports,"ram_callback_targets":len(ram_callback_targets),"ram_callback_returns":len(ram_callback_returns),"ram_callback_records":ram_callback_report.get("records",[]),"ram_callback_analysis_limits":{"pair_limit_reached":ram_callback_report.get("pair_limit_reached",False),"exhausted_contexts":ram_callback_report.get("exhausted_contexts",[])},"total_blocks_after_static_closure":len(blocks),"input_exploration":exploration_report,"scenarios":scenario_reports,"blocks":blocks},indent=2)+"\n")
     emit_native_blocks(blocks,out)
     return blocks
 
@@ -1068,6 +1069,15 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
                 lines += ["\ttst.b gb_dma_active",f"\tbeq.s .dynamic_accessible_{resolver}"]
                 lines += [f"\tbra.w .dynamic_variant_{resolver}_{ff_index}" if ff_index is not None else f"\tbra.w .dynamic_missing_{resolver}",f".dynamic_accessible_{resolver}:","\tlea gb_oam,a0"]
                 base=pc-0xFE00
+            elif 0xC000<=pc<0xFE00:
+                # WRAM and its echo share storage but retain logical PCs.
+                # Only observed byte sequences are compiled, never decoded
+                # dynamically by the target runtime.
+                lines += ["\tlea gb_wram,a0"]
+                base=pc-(0xC000 if pc<0xE000 else 0xE000)
+                end=0xE000 if pc<0xE000 else 0xFE00
+                if any(pc+len(bytes.fromhex(v['bytes']))>end for v in variants):
+                    raise RuntimeError(f"dynamic code variant crosses WRAM window at ${pc:04X}")
             elif 0xFF80<=pc<0xFFFF:
                 lines += ["\tlea gb_hram,a0"]
                 base=pc-0xFF80

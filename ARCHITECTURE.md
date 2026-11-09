@@ -531,13 +531,13 @@ native results separate:
   protocols with instruction/frame/loop limits and records full diagnostics.
 - `compile_native()` assembles only Python-passing tests but leaves them
   `NOT_RUN` until a native success condition is observed.
-- `run_native_blastem()` currently observes Mooneye Fibonacci register
-  signatures through the BlastEm debugger.
+- `run_native_blastem()` observes Mooneye Fibonacci register signatures or an
+  explicitly instrumented native diagnostic serial stream through BlastEm.
 - `write_report()` produces JSON status counts and per-ROM details.
 
 A ROM drawing a recognizable image or reaching a loop is not automatically a
-PASS. Screenshot suites, native Blargg serial observation, and broad native
-differential testing remain unfinished.
+PASS. Screenshot suites and broad instruction-boundary native differential
+testing remain unfinished.
 
 ## Polling and bank safety update (2026-11-08)
 
@@ -604,3 +604,37 @@ The design rule for all fixes is to reproduce the smallest general hardware or
 compiler error, repair the shared implementation, and add a regression. Game
 titles, hashes, individual PCs, and game-state addresses must not enter the
 general compiler/runtime as compatibility shortcuts.
+
+## Optional native serial test peer and writable code variants
+
+`serial_test.SerialTestMemory` is an explicit diagnostic model, matching the
+runner's established instantaneous receiver: a write to SC ($FF02) with bits
+7 and 0 set captures SB and clears SC bit7 immediately. It does not implement
+serial bit timing, link-cable behavior or serial interrupts. Normal tracing
+continues using `gb_cpu.Memory`; diagnostic tracing selects the test subclass.
+
+`build(..., test_serial=True)` / `--test-serial` defines `GB2MD_TEST_SERIAL`
+for assembly. Only that build includes a matching native peer in `gb_write8`.
+The native buffer is bounded to512 bytes at `$FFD000`, with a word count at
+`$FFC600` and overflow flag at `$FFC602`. These regions are above cartridge
+RAM and tile-dirty state and below the Genesis stack. Normal builds assemble
+no observer instructions;14 timer/reg_f images rebuilt byte-identically with
+the diagnostic option disabled. Both trace and build reports record the mode.
+The GUI does not enable this test-only setting.
+
+`compile_native()` automatically selects this instrumentation for recognized
+Blargg serial fixtures. `run_native_blastem()` refuses uninstrumented builds,
+reads the native count/buffer, validates bounds/overflow, and requires the
+actual Passed/Failed message. Python PASS does not imply native PASS. Missing
+blocks, emulator errors and observer failures take precedence; prefix output
+is retained for missing-block investigations. Native failures now also make
+the compatibility CLI return a nonzero exit code.
+
+The same pass extends `emit_native_blocks()`'s finite byte-variant resolver
+to WRAM and echo RAM, using their shared `gb_wram` storage and distinct logical
+PCs. Each observed sequence is translated to a separate native body; runtime
+byte comparisons select that body. Unknown sequences trap instead of decoding
+new SM83 instructions. Multi-variant instructions crossing WRAM/echo windows
+are rejected. This is finite specialization, not an interpreter or complete
+support for arbitrary self-modifying code. Single observed variants and
+unobserved RAM entry points remain coverage limitations.

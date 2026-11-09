@@ -573,6 +573,32 @@ gb_write8:
 	move.b (sp)+,d2
 .not_stat_write:
 	move.b d0,(a0,d1.w)
+	; Optional test-only instantaneous serial peer. No instructions or RAM
+	; accesses from this observer are assembled into normal game builds.
+	ifd GB2MD_TEST_SERIAL
+	cmpi.w #2,d1
+	bne.s .serial_probe_done
+	move.b d0,d2
+	andi.b #$81,d2
+	cmpi.b #$81,d2
+	bne.s .serial_probe_done
+	movem.l d0-d2/a0,-(sp)
+	moveq #0,d2
+	move.w $FFC600,d2
+	cmpi.w #512,d2
+	bhs.s .serial_probe_overflow
+	lea $FFD000,a0
+	move.b gb_io+1,(a0,d2.w)
+	addq.w #1,$FFC600
+	bra.s .serial_probe_recorded
+.serial_probe_overflow:
+	move.b #1,$FFC602
+.serial_probe_recorded:
+	movem.l (sp)+,d0-d2/a0
+	andi.b #$7F,d0
+	move.b d0,gb_io+2
+.serial_probe_done:
+	endif
 	cmpi.w #$0040,d1
 	beq.s .sync_stat_write
 	cmpi.w #$0041,d1
