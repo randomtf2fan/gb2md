@@ -1,5 +1,55 @@
 # GB2MD compatibility status
 
+
+## Indexed callbacks and additional native room progression — 2026-11-09
+
+**150/150 tests PASS with native integration enabled** (143 ordinary and
+seven opt-in native methods exercising original diagnostic ROMs under BlastEm).
+The full run completed in 369 seconds. An actual GUI subprocess build and
+cancellation check pass using the current compiler. All 14 timer/reg_f images
+rebuild byte-identically to their earlier protocol-verified native versions;
+this parity check is not a claim of new native protocol executions.
+
+A bounded ROM-record/RAM-callback analyzer now derives bank selectors, record
+copy spans and callback offsets from verified instructions. It does not assume
+an application layout. Original fixtures cover relocated operands, ROM-only
+mapping, MBC3, MBC5 bank zero, alias rejection and bounded analysis. Static
+closure also handles a verified indexed-call helper preserving HL/DE/BC and
+its restoring return trampoline. Scans stop at forward code boundaries to
+avoid treating adjacent functions as additional pointers. These are candidate
+coverage improvements, not a full reachability or points-to analysis.
+
+The private longer-traced Pokémon image successfully boots, completes player
+and rival naming, enters the room, responds to movement and interaction, and
+**descends the stairs into the downstairs room**. Talking to the mother
+character then traps on missing native entry `$12:$4170`, inside a text stream
+that transfers control into inline code. This is limited indoor progression;
+not a complete playable game. The tested image is byte-identical to a fresh
+ordinary CLI build. Its SHA1 is
+`7f54a513a5df01deb2e8d76f34e78017d01898f6`.
+
+A separate fresh default-settings build (`--steps 15000000 --auto-inputs`)
+executes 34,200,000 trace instructions and emits 37,927 entries. It matches the
+static replay byte for byte, but native boot reaches missing entry
+`$01:$42B7`, with a blank viewport and diagnostic marker/count set. It still
+misses 127 entries present in the longer trace, despite adding other paths.
+**Do not treat a successful build, more entries, or GUI defaults as complete
+coverage.** Longer exploration remains necessary and still cannot guarantee
+all conversations, outdoor paths or battles are compiled.
+
+That default-settings image initially exceeded 4 MiB. Omitting the unused
+8-byte-per-entry ROM debug catalog saves 303,416 bytes, allowing it to fit at
+4,152,552 bytes while preserving all 2,262 hot chains, native code and live
+dispatch. The builder tries catalog omission before reducing inline scheduler
+stubs; `--keep-rom-catalog` preserves the export for external tools. Trace JSON
+still lists entries. Native original fixtures verify the relocated ROM data
+and callback/register behavior. No speedup measurement is claimed.
+
+CPU, timers, DMA and Genesis runtime semantics are unchanged in this pass.
+Known-good Tetris and Pokémon checkpoints remain intact. Other games were not
+newly playtested; earlier statuses remain in the historical sections below.
+
+
 ## Long input exploration and native room movement — 2026-11-09
 
 **126/126 tests PASS with native integration enabled** (121 ordinary and five

@@ -255,6 +255,49 @@ ROM-only code may also index a pointer table in the fixed upper ROM window.
 The table reader maps that window directly instead of requiring an inferred
 selected bank.
 
+`ram_callback_analysis.py` connects one validated indexed record-copy convention
+with RAM-loaded indirect calls. `RamCallbackAnalyzer.selector()` verifies a
+fixed-ROM helper that saves HL/BC, reads a byte bank table through a temporary
+bank, restores the prior bank, then selects the result. Save/restore slots,
+shadow, scratch byte and mapper operands must agree and must not alias.
+
+The analyzer then follows bounded bank/index-preserving fixed-ROM continuations.
+It recognizes a doubled-index ROM pointer lookup followed by a literal-size
+byte copy into RAM, and a caller loading a RAM word into HL before JP(HL).
+Both contexts must use the same selector and index variable. The callback word
+must lie inside the copied record; its offset is computed from the two RAM
+operands. Unknown calls/stores, index overwrites and changed helper sequences
+reject the proof. No application record layout or game addresses are supplied.
+
+`discover()` examines at most256 byte indices and validates mapped ROM bounds,
+record spans and callback instruction bytes. Invalid records are skipped,
+allowing gaps; candidates are not proof of actual reachability. MBC1/5 unknown
+upper bank bits are enumerated through the existing bank-candidate function.
+ROM-only mapping and MBC5 bank zero have original native tests. This is not a
+general points-to analysis and does not cover arbitrary copy/helper conventions.
+
+When ordinary static closure drains, `compile_trace()` adds these candidates
+and explicit consumer-return entries, then resumes closure to a fixed point.
+Trace/build reports expose `ram_callback_targets`, `ram_callback_returns`,
+`ram_callback_records` and `ram_callback_analysis_limits`. Context walks and
+record pairs have bounded budgets (defaults128 and64); exhausted budgets warn.
+The original loader, RAM contents, bank selection and calls still execute as
+native instructions. The analysis supplies coverage only.
+
+`hl_dispatch_table()` also recognizes a verified indexed-call helper that
+saves HL/DE/BC, doubles A in an eight-bit register, loads a table pointer,
+pushes its own restoring trampoline, and jumps through HL. Both CALL and tail
+JP setup are supported; bounded JP aliases must resolve to the same verified
+helper. The restoring return is a separate executable root. The eight-bit
+index bounds the table to 128 pointers; changed helpers, unknown mappings,
+and instructions that overwrite HL are rejected. For this helper, scanning
+stops before a forward code target in the table's physical ROM bank, avoiding
+misreading adjacent function bytes as more pointers into padding. This is
+candidate discovery, not proof that every accepted entry is reachable.
+Reports separate `indexed_call_targets`, `indexed_call_returns` and
+`indexed_call_tables`, including entry limits and stop reasons. Legacy table
+recognizers keep their existing scan rules.
+
 `bank_analysis.py` adds a limited bank-effect proof. Starting after a constant
 mapper write, `fixed_bank_context_targets()` follows fixed-ROM control flow for
 up to 128 distinct states. `leaf_preserves_rom_bank()` checks both branch
@@ -337,20 +380,24 @@ or unwinds its temporary stack before general dispatch. d7 remains the cycle
 accumulator. This shares generated code, not SM83 instruction interpretation.
 
 `native-codegen-report.json` records compact/hot chain counts and the limit.
-In one identical
-22,205-block trace, sharing cold edges reduced the ROM from 5,015,608 to
-3,488,384 bytes. Extra stack traffic on cold paths can cost execution time;
-this is a size improvement, not a measured speedup. T-cycle costs are unchanged.
-`build()` assembles to `recompiled.raw.bin`. If the image exceeds the supported
-4 MiB cartridge layout, it halves the duplicated-stub quota and reassembles,
-using the existing trace rather than rerunning discovery. Each retry strictly
-decreases the quota to zero; `native_layout_attempts` records sizes and counts.
-If the fully compact layout still does not fit, the build fails before writing
-`recompiled.md`, preserving any previous ROM. No coverage is removed to fit.
-Larger Genesis cartridge mapping is not implemented. Mixed/all-compact IRQ and
-mapper tests exercise scheduler equivalence; all-compact timer/reg_f signatures
-also passed in native execution. Extra stack traffic can affect host throughput,
-so this capacity fallback is not a claim of faster games.
+It also reports `block_catalog_included` and `block_catalog_bytes`. The catalog
+at `gb_compiled_block_table` is an eight-byte-per-entry debug export; live
+execution uses the separate tree/page dispatcher and direct chain labels.
+The default emitter retains the catalog for existing debugging workflows.
+
+If an assembled image exceeds the supported 4 MiB cartridge window, `build()`
+first omits the duplicate catalog without removing code or altering dispatch.
+The exported label and sentinel remain. Trace/build JSON still lists entries.
+`--keep-rom-catalog` requires retaining the catalog, for external tools that
+may consume it. If more space is required, the builder halves the duplicated
+inline-stub quota, ranking hot targets by dynamic hits and bank/PC tie breaks.
+Each retry preserves every executable entry and does not retrace the ROM.
+`native_layout_attempts` records sizes, catalog presence and stub quotas.
+If even the fully compact layout cannot fit, the build fails before writing
+`recompiled.md`, preserving any previous ROM. Larger Genesis cartridge mapping
+is not implemented. Original native callback fixtures test execution and ROM
+data reads after catalog omission; mixed/all-compact IRQ/mapper tests cover
+scheduler equivalence. Capacity fallback is not a speedup claim.
 
 ## Genesis runtime and memory mapping
 

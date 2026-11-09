@@ -418,8 +418,41 @@ class SmokeTest(unittest.TestCase):
             self.assertEqual(len(calls),2)
             self.assertEqual(binary.stat().st_size,0x80000)
             report=json.loads((root/'out'/'build-report.json').read_text())
-            self.assertEqual([a['hot_chain_targets'] for a in report['native_layout_attempts']],[3,1])
+            self.assertEqual([a['hot_chain_targets'] for a in report['native_layout_attempts']],[3,3])
+            self.assertEqual([a['block_catalog_included'] for a in report['native_layout_attempts']],[True,False])
             self.assertEqual(report['blocks'],3)
+
+    def test_catalog_omission_preserves_native_code_and_dispatch(self):
+        import trace_recompiler as trace
+        rom=bytearray(0x8000);rom[0x100:0x104]=bytes.fromhex('040d18fc')
+        with tempfile.TemporaryDirectory() as d:
+            root=pathlib.Path(d);source=root/'catalog.gb';source.write_bytes(rom)
+            blocks=trace.compile_trace(source,root/'out',15)
+            original=(root/'out'/'translated_trace.s').read_text()
+            trace.emit_native_blocks(blocks,root/'out',include_block_table=False)
+            omitted=(root/'out'/'translated_trace.s').read_text()
+            self.assertEqual(original.split('gb_compiled_block_table:')[0],omitted.split('gb_compiled_block_table:')[0])
+            self.assertEqual(omitted.split('gb_compiled_block_table:')[1],'\n\tdc.w $FFFF,$FFFF\n\tdc.l 0')
+            report=json.loads((root/'out'/'native-codegen-report.json').read_text())
+            self.assertFalse(report['block_catalog_included'])
+            self.assertEqual(report['block_catalog_bytes'],8)
+            self.assertEqual(report['blocks'],len(blocks))
+
+    def test_require_catalog_keeps_previous_quota_retry_behavior(self):
+        from unittest.mock import patch
+        import build_recompiled as compiler
+        rom=bytearray(0x8000);rom[0x100:0x104]=bytes.fromhex('040d18fc')
+        with tempfile.TemporaryDirectory() as d:
+            root=pathlib.Path(d);source=root/'catalog.gb';source.write_bytes(rom)
+            assembler=root/'assembler';assembler.touch();calls=[]
+            def assemble(command,**kwargs):
+                calls.append(command)
+                pathlib.Path(command[-1]).write_bytes(bytes(0x400002 if len(calls)==1 else 0x80000))
+            with patch.object(compiler.subprocess,'run',side_effect=assemble):
+                compiler.build(source,root/'out',15,assembler=assembler,keep_rom_catalog=True)
+            report=json.loads((root/'out'/'build-report.json').read_text())
+            self.assertEqual([a['hot_chain_targets'] for a in report['native_layout_attempts']],[3,1])
+            self.assertEqual([a['block_catalog_included'] for a in report['native_layout_attempts']],[True,True])
 
     def test_native_layout_all_compact_failure_preserves_rom(self):
         from unittest.mock import patch
@@ -433,7 +466,7 @@ class SmokeTest(unittest.TestCase):
                 calls.append(command);pathlib.Path(command[-1]).write_bytes(bytes(0x400002))
             with patch.object(compiler.subprocess,'run',side_effect=assemble):
                 with self.assertRaisesRegex(ValueError,'4 MiB'):compiler.build(source,out,15,assembler=assembler)
-            self.assertEqual(len(calls),3) #3 ->1 ->0 duplicated scheduler stubs
+            self.assertEqual(len(calls),4) #catalog omission, then3 ->1 ->0 scheduler stubs
             self.assertEqual(binary.read_bytes(),b'preserved')
 
     def test_bank_context_closure_discovers_following_call(self):

@@ -19,7 +19,7 @@ def find_assembler(explicit=None):
         if candidate.is_file():return candidate.resolve()
     raise FileNotFoundError("vasmm68k_mot not found; use --assembler, GB2MD_VASM, or PATH")
 
-def build(source,out,steps=100000,color_profile="green",input_scripts=(),auto_steps=False,auto_max_steps=50_000_000,auto_chunk_steps=None,auto_plateau_chunks=3,auto_min_new_blocks=1,auto_inputs=False,input_max_branches=128,input_max_depth=4,input_branch_steps=150_000,input_max_steps=20_000_000,input_hold_frames=4,input_snapshot_interval_frames=4,input_max_snapshots=1024,input_bridge_states_per_depth=8,assembler=None,input_sweep_steps=0):
+def build(source,out,steps=100000,color_profile="green",input_scripts=(),auto_steps=False,auto_max_steps=50_000_000,auto_chunk_steps=None,auto_plateau_chunks=3,auto_min_new_blocks=1,auto_inputs=False,input_max_branches=128,input_max_depth=4,input_branch_steps=150_000,input_max_steps=20_000_000,input_hold_frames=4,input_snapshot_interval_frames=4,input_max_snapshots=1024,input_bridge_states_per_depth=8,assembler=None,input_sweep_steps=0,keep_rom_catalog=False):
     out.mkdir(parents=True,exist_ok=True); rom_data=source.read_bytes(); scenarios=[parse_input_script(s) if isinstance(s,str) else s for s in input_scripts];blocks=compile_trace(source,out,steps,scenarios,auto_steps,auto_max_steps,auto_chunk_steps,auto_plateau_chunks,auto_min_new_blocks,auto_inputs,input_max_branches,input_max_depth,input_branch_steps,input_max_steps,input_hold_frames,input_snapshot_interval_frames,input_max_snapshots,input_bridge_states_per_depth,input_sweep_steps)
     profile=COLOR_PROFILES[color_profile]
     equates=[f"gb_shade{i} equ ${v:04X}" for i,v in enumerate(profile["shades"])]
@@ -170,9 +170,15 @@ gb_cart_rom:
         codegen_path=out/'native-codegen-report.json'
         codegen=json.loads(codegen_path.read_text()) if codegen_path.exists() else {}
         hot=codegen.get('hot_chain_targets',0)
+        catalog=codegen.get('block_catalog_included',bool(codegen))
         layout_attempts.append({'rom_bytes':size,'hot_chain_targets':hot,
-                                'hot_chain_limit':codegen.get('hot_chain_limit')})
+                                'hot_chain_limit':codegen.get('hot_chain_limit'),
+                                'block_catalog_included':catalog})
         if size<=0x400000:break
+        if catalog and not keep_rom_catalog:
+            print('Native image exceeds 4 MiB; omitting the unused duplicate ROM block catalog (dispatch entries and trace reports retained). Use --keep-rom-catalog to require it.',flush=True)
+            emit_native_blocks(blocks,out,max_hot_chains=codegen.get('hot_chain_limit'),include_block_table=False)
+            continue
         if hot<=0:
             raise ValueError(f"native image needs {size:,} bytes, exceeding the supported 4 MiB cartridge window; "
                              "larger Genesis cartridge mapping is not implemented. Existing recompiled.md was preserved.")
@@ -181,7 +187,7 @@ gb_cart_rom:
         # entries. The shared scheduler already implements the same checks.
         limit=hot//2
         print(f'Native image {size:,} bytes exceeds 4 MiB; retrying with {limit} profile-ranked inline scheduler stubs (all blocks retained)',flush=True)
-        emit_native_blocks(blocks,out,max_hot_chains=limit)
+        emit_native_blocks(blocks,out,max_hot_chains=limit,include_block_table=catalog)
     image.extend(bytes(size-len(image)))
     struct.pack_into(">I",image,0x1A4,size-1)
     checksum=sum(struct.unpack_from(">H",image,i)[0] for i in range(0x200,size,2))&0xFFFF;struct.pack_into(">H",image,0x18E,checksum);binary.write_bytes(image)
@@ -191,9 +197,12 @@ gb_cart_rom:
         "trace_steps_executed":trace_report["total_steps_executed"],
         "dynamic_unique_blocks":trace_report["dynamic_unique_blocks"],
         "banked_pointer_tables":trace_report.get("banked_pointer_tables",[]),
+        "ram_callback_records":trace_report.get("ram_callback_records",[]),
+        "indexed_call_tables":trace_report.get("indexed_call_tables",[]),
+        "ram_callback_analysis_limits":trace_report.get("ram_callback_analysis_limits",{}),
         **{name:trace_report.get(name,0) for name in (
             "indirect_table_targets","hl_pointer_table_targets","bitmask_dispatch_targets","rst_inline_table_targets",
-            "constant_bank_call_targets","constant_far_call_targets","constant_far_call_returns","banked_pointer_table_targets","bank_context_targets")},
+            "constant_bank_call_targets","constant_far_call_targets","constant_far_call_returns","banked_pointer_table_targets","bank_context_targets","ram_callback_targets","ram_callback_returns","indexed_call_targets","indexed_call_returns")},
         "trace_stop_reasons":[s["stop_reason"] for s in trace_report["scenarios"]],
         "input_exploration":trace_report["input_exploration"],"input_scripts":list(input_scripts),
         "color_profile":color_profile,"blocks":len(blocks),
@@ -203,5 +212,5 @@ gb_cart_rom:
     (out/"build-report.json").write_text(json.dumps(build_report,indent=2)+"\n")
     return binary
 def main():
-    p=argparse.ArgumentParser();p.add_argument("rom",type=pathlib.Path);p.add_argument("--out",type=pathlib.Path,default=pathlib.Path("build-recompiled"));p.add_argument("--steps",type=int,default=100000,help="fixed steps per scenario, or initial auto-step chunk");p.add_argument("--auto-steps",action="store_true",help="extend scenarios while new blocks are discovered");p.add_argument("--auto-max-steps",type=int,default=50_000_000);p.add_argument("--auto-chunk-steps",type=int);p.add_argument("--auto-plateau-chunks",type=int,default=3);p.add_argument("--auto-min-new-blocks",type=int,default=1);p.add_argument("--auto-inputs",action="store_true",help="branch from JOYP reads using bounded controller exploration");p.add_argument("--input-max-branches",type=int,default=128);p.add_argument("--input-max-depth",type=int,default=4);p.add_argument("--input-branch-steps",type=int,default=150_000);p.add_argument("--input-max-steps",type=int,default=20_000_000);p.add_argument("--input-sweep-steps",type=int,default=0,help="optional long Start/A sweep within --input-max-steps; requires --auto-inputs");p.add_argument("--input-hold-frames",type=int,default=4);p.add_argument("--input-snapshot-interval-frames",type=int,default=4);p.add_argument("--input-max-snapshots",type=int,default=1024);p.add_argument("--input-bridge-states-per-depth",type=int,default=8);p.add_argument("--color-profile",choices=sorted(COLOR_PROFILES),default="green");p.add_argument("--assembler",type=pathlib.Path,help="external vasmm68k_mot path (or set GB2MD_VASM)");p.add_argument("--input-script",action="append",default=[],metavar="PULSES",help="merge an input-guided trace, e.g. start@512:8,a@560:4");a=p.parse_args();print(build(a.rom,a.out,a.steps,a.color_profile,a.input_script,a.auto_steps,a.auto_max_steps,a.auto_chunk_steps,a.auto_plateau_chunks,a.auto_min_new_blocks,a.auto_inputs,a.input_max_branches,a.input_max_depth,a.input_branch_steps,a.input_max_steps,a.input_hold_frames,a.input_snapshot_interval_frames,a.input_max_snapshots,a.input_bridge_states_per_depth,a.assembler,a.input_sweep_steps))
+    p=argparse.ArgumentParser();p.add_argument("rom",type=pathlib.Path);p.add_argument("--out",type=pathlib.Path,default=pathlib.Path("build-recompiled"));p.add_argument("--steps",type=int,default=100000,help="fixed steps per scenario, or initial auto-step chunk");p.add_argument("--auto-steps",action="store_true",help="extend scenarios while new blocks are discovered");p.add_argument("--auto-max-steps",type=int,default=50_000_000);p.add_argument("--auto-chunk-steps",type=int);p.add_argument("--auto-plateau-chunks",type=int,default=3);p.add_argument("--auto-min-new-blocks",type=int,default=1);p.add_argument("--auto-inputs",action="store_true",help="branch from JOYP reads using bounded controller exploration");p.add_argument("--input-max-branches",type=int,default=128);p.add_argument("--input-max-depth",type=int,default=4);p.add_argument("--input-branch-steps",type=int,default=150_000);p.add_argument("--input-max-steps",type=int,default=20_000_000);p.add_argument("--input-sweep-steps",type=int,default=0,help="optional long Start/A sweep within --input-max-steps; requires --auto-inputs");p.add_argument("--input-hold-frames",type=int,default=4);p.add_argument("--input-snapshot-interval-frames",type=int,default=4);p.add_argument("--input-max-snapshots",type=int,default=1024);p.add_argument("--input-bridge-states-per-depth",type=int,default=8);p.add_argument("--color-profile",choices=sorted(COLOR_PROFILES),default="green");p.add_argument("--keep-rom-catalog",action="store_true",help="retain the duplicate ROM debug block catalog even when reducing image size");p.add_argument("--assembler",type=pathlib.Path,help="external vasmm68k_mot path (or set GB2MD_VASM)");p.add_argument("--input-script",action="append",default=[],metavar="PULSES",help="merge an input-guided trace, e.g. start@512:8,a@560:4");a=p.parse_args();print(build(a.rom,a.out,a.steps,a.color_profile,a.input_script,a.auto_steps,a.auto_max_steps,a.auto_chunk_steps,a.auto_plateau_chunks,a.auto_min_new_blocks,a.auto_inputs,a.input_max_branches,a.input_max_depth,a.input_branch_steps,a.input_max_steps,a.input_hold_frames,a.input_snapshot_interval_frames,a.input_max_snapshots,a.input_bridge_states_per_depth,a.assembler,a.input_sweep_steps,a.keep_rom_catalog))
 if __name__=="__main__":main()

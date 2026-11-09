@@ -92,14 +92,14 @@ all obligations are reviewed. BlastEm is optional and likewise treated as an
 external local test dependency.
 
 The `test_roms/` collection and all input `.gb`/`.gbc` files are local fixtures
-and are ignored by the repository safety rules. The 121 focused unit tests use
+and are ignored by the repository safety rules. The 143 focused unit tests use
 synthetic data and do not require commercial ROMs. Compatibility-suite runs
 require the user to supply the relevant test ROMs separately.
 
-Five additional native integration methods use original diagnostic ROMs
+Seven additional native integration methods use original diagnostic ROMs
 generated from test source: controller rows, static dispatch discovery, compact
 scheduler interrupt/mapper paths, missing dispatch slots/pages/banks, and
-far-call bank restoration. Enable them with `GB2MD_NATIVE_TESTS=1`, `GB2MD_BLASTEM=/path/to/blastem` and
+far-call bank restoration, indexed record/RAM callbacks and preserving indexed calls. Enable them with `GB2MD_NATIVE_TESTS=1`, `GB2MD_BLASTEM=/path/to/blastem` and
 `GB2MD_VASM=/path/to/vasmm68k_mot` when running the unit suite. They open BlastEm
 windows and check result memory plus missing-block diagnostics.
 
@@ -107,12 +107,14 @@ Static coverage now includes bounded bank/address tables, bank shadow stores,
 verified bank-setter helpers, and consecutive calls through proven
 bank-preserving leaf routines. Verified B/HL far calls include the callback
 and return trampoline; exact input-bit dispatchers include return/callback
-pairs. Recognized bank/address tables have a 128-entry bound derived from the
+pairs. A bounded record-copy analyzer derives RAM callback fields from verified
+bank selectors and copy/caller instructions, without application layouts. Recognized bank/address tables have a 128-entry bound derived from the
 helper arithmetic and report truncation. These improve coverage but do not
 guarantee that every computed jump is discovered. Cold native scheduler stubs
 share code to reduce output size. If an image exceeds the supported 4 MiB
-layout, the builder tries profile-ranked compact scheduler stubs while retaining
-every translated entry. If it still cannot fit, compilation fails before
+layout, the builder first omits an unused duplicate ROM debug catalog, then
+tries profile-ranked compact scheduler stubs while retaining every translated
+entry. `--keep-rom-catalog` retains the export for external debugging tools. If it still cannot fit, compilation fails before
 replacing an existing `recompiled.md`. Larger cartridge mapping is unsupported.
 
 Dense programs can use a bank/page native dispatch table; small or sparse

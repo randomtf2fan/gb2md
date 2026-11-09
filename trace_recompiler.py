@@ -12,6 +12,7 @@ from gb_cpu import CPU, Memory, instruction_cycles
 from lr35902_lowering import family
 from gb2md import instruction_length
 from bank_analysis import fixed_bank_context_targets
+from ram_callback_analysis import RamCallbackAnalyzer
 
 REGS=("gb_b","gb_c","gb_d","gb_e","gb_h","gb_l",None,"gb_a")
 REGS16=("gb_b","gb_d","gb_h","gb_sp")
@@ -231,12 +232,12 @@ def bitmask_dispatch_targets(rom,bank,pc):
         records+=1;targets.extend(pair)
     return list(dict.fromkeys(targets)) if records>=2 else []
 
-def hl_dispatch_table(rom,bank,pc):
+def hl_dispatch_table(rom,bank,pc,diagnostics=None):
     """Track a ROM table through a bounded, bank-stable pointer lookup.
 
-    Only forward JR, NOP and BC/DE immediate setup preserve the tracked HL.
-    The exact helper consumes A (zero/one based) and returns table[A] in HL.
-    Unknown calls or HL writes terminate recognition instead of guessing.
+    Track bank-stable setup and A-only index computation without changing HL.
+    Verify helpers returning table[A] in HL or calling it through a preserving
+    trampoline. Unknown calls and HL writes terminate recognition.
     """
     signatures=(bytes.fromhex('cb274f0600094e23466069c9'),
                 bytes.fromhex('3dcb274f0600094e23466069c9'))
@@ -254,6 +255,19 @@ def hl_dispatch_table(rom,bank,pc):
     # Inline A*2 / BC-index / little-endian HL lookup, with optional BC save.
     inline=(bytes.fromhex('c58706004f09c12a666fe9'),bytes.fromhex('8706004f092a666fe9'))
     if any(read(cursor,len(signature))==signature for signature in inline):return table
+    def callback_return(helper):
+        seen=set()
+        for _ in range(4):
+            if helper in seen:return None
+            seen.add(helper);body=read(helper,3)
+            if body is None:return None
+            if body[0]==0xC3:helper=body[1]|body[2]<<8;continue
+            body=read(helper,20)
+            if (body is not None and body[:12]==bytes.fromhex('e5d5c58716005f192a666f11')
+                and body[14:]==bytes.fromhex('d5e9c1d1e1c9')
+                and (body[12]|body[13]<<8)==helper+16):return helper+16
+            return None
+        return None
     for _ in range(12):
         if cursor>=end:return None
         raw=read(cursor,1)
@@ -268,10 +282,21 @@ def hl_dispatch_table(rom,bank,pc):
             raw=read(cursor,2)
             if not raw or raw[1]>=128:return None
             cursor+=2+raw[1]
-        elif op==0xCD and not resolved:
+        elif op in (0x0A,0x1A,0xF2,0x3C,0x3D,0x07,0x0F,0x17,0x1F,0x27,0x2F,0x37,0x3F) or 0x78<=op<=0xBF:
+            cursor+=1 # A/flags only; no HL, memory or mapper writes.
+        elif op in (0xFA,0xF0,0x3E,0xC6,0xCE,0xD6,0xDE,0xE6,0xEE,0xF6,0xFE):
+            size=instruction_length(op)
+            if cursor+size>end or read(cursor,size) is None:return None
+            cursor+=size
+        elif op in (0xCD,0xC3) and not resolved:
             raw=read(cursor,3)
-            if not raw or cursor+3>end:return None
-            helper=raw[1]|raw[2]<<8
+            if raw is None or cursor+3>end:return None
+            helper=raw[1]|raw[2]<<8;return_pc=callback_return(helper)
+            if return_pc is not None:
+                if diagnostics is not None:
+                    diagnostics.update(helper=helper,return_address=return_pc,entry_limit=128,min_entries=1)
+                return table
+            if op==0xC3:return None
             if not any(read(helper,len(s))==s for s in signatures):return None
             resolved=True;cursor+=3
         else:return None
@@ -773,35 +798,65 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
         # are already present in ``first`` and remain diagnostics.
         if family(rom[offset]) in ("INVALID","STOP"):return
         first[key]=rom[offset:offset+size];hits[key]+=0;frontier.append(key)
-    def bounded_pointer_table(source_key,table,max_entries=64):
+    def bounded_pointer_table(source_key,table,max_entries=64,stop_at_targets=False,diagnostics=None):
         """Return consecutive, validated ROM code pointers from ``table``.
 
         A minimum length is enforced by callers.  The first invalid pointer
         terminates the table, preventing speculative scanning through adjacent
         data or instructions.
         """
-        candidates=[];source_bank,_=source_key
+        candidates=[];source_bank,_=source_key;table_offset=None;code_end=None;stop_reason='entry_limit'
+        window_end=0x4000 if table<0x4000 else 0x8000
         for index in range(max_entries):
             address=(table+index*2)&0xFFFF
-            if address+1>=0x8000:break
+            if address+1>=0x8000 or stop_at_targets and address+1>=window_end:
+                stop_reason='table_boundary';break
             if address<0x4000:entry_offset=address
             elif rom[0x147] in (0,8,9):entry_offset=address
             elif source_bank or (0x4000<=source_key[1]<0x8000 and 0x19<=rom[0x147]<=0x1E):entry_offset=source_bank*0x4000+address-0x4000
-            else:break
-            if entry_offset+1>=len(rom):break
+            else:stop_reason='unknown_bank';break
+            if table_offset is None:table_offset=entry_offset
+            if code_end is not None and entry_offset+2>code_end:
+                stop_reason='code_boundary';break
+            if entry_offset+1>=len(rom):stop_reason='table_boundary';break
             target=rom[entry_offset]|rom[entry_offset+1]<<8;target_key=rom_key(source_key,target)
-            if target_key is None:break
+            if target_key is None:stop_reason='non_code_pointer';break
             target_bank,target_pc=target_key
             target_offset=target_pc if target_pc<0x4000 else target_bank*0x4000+target_pc-0x4000
-            if target_offset>=len(rom) or family(rom[target_offset]) in ("INVALID","STOP"):break
+            if target_offset>=len(rom) or family(rom[target_offset]) in ("INVALID","STOP"):
+                stop_reason='non_code_pointer';break
             candidates.append(target_key)
+            if stop_at_targets and target_offset//0x4000==table_offset//0x4000 and target_offset>table_offset:
+                code_end=target_offset if code_end is None else min(code_end,target_offset)
+        if diagnostics is not None:diagnostics['stop_reason']=stop_reason
         return candidates
     # Interrupt entry is asynchronous and target timing can take a vector that
     # a finite reference trace did not. Compile every non-padding cartridge
     # vector independently of whether the oracle happened to service it.
     for vector in (0x40,0x48,0x50,0x58,0x60):
         if vector < len(rom) and rom[vector] not in (0x00,0xFF):add_rom_block((0,vector))
-    while frontier:
+    ram_callback_analyzer=RamCallbackAnalyzer(rom,_selected_bank_candidates)
+    ram_callback_targets=set();ram_callback_returns=set();ram_callback_report={}
+    indexed_call_targets=set();indexed_call_returns=set();indexed_call_reports=[]
+    analyzed_size=-1;warned_contexts=set();warned_pair_limit=False
+    while frontier or analyzed_size!=len(first):
+        if not frontier:
+            analyzed_size=len(first)
+            ram_callback_report=ram_callback_analyzer.discover(first.keys())
+            for target_key in sorted(ram_callback_report['targets']):
+                add_rom_block(target_key)
+                if target_key in first:ram_callback_targets.add(target_key)
+            for return_key in sorted(ram_callback_report['returns']):
+                add_rom_block(return_key)
+                if return_key in first:ram_callback_returns.add(return_key)
+            for context in ram_callback_report['exhausted_contexts']:
+                if context not in warned_contexts:
+                    print(f'warning: RAM callback context at $00:${context:04X} reached its analysis budget',flush=True)
+                    warned_contexts.add(context)
+            if ram_callback_report['pair_limit_reached'] and not warned_pair_limit:
+                print('warning: RAM callback record-pair analysis budget reached',flush=True)
+                warned_pair_limit=True
+            if not frontier:break
         key=frontier.popleft()
         if key in expanded:continue
         expanded.add(key);bank,pc=key;raw=first[key];op=raw[0];fam=family(op)
@@ -889,12 +944,24 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
             elif bank:sequence_offset=bank*0x4000+pc-0x4000
             else:sequence_offset=-1
             sequence=rom[sequence_offset:sequence_offset+7] if sequence_offset>=0 else b""
-            table=(sequence[1]|sequence[2]<<8) if len(sequence)==7 and sequence[0]==0x21 and sequence[3]==0xCD and sequence[6]==0xE9 else hl_dispatch_table(rom,bank,pc)
+            dispatch_diagnostic={}
+            table=hl_dispatch_table(rom,bank,pc,dispatch_diagnostic)
+            if table is None and len(sequence)==7 and sequence[0]==0x21 and sequence[3]==0xCD and sequence[6]==0xE9:
+                table=sequence[1]|sequence[2]<<8
             if table is not None:
-                candidates=bounded_pointer_table(key,table)
-                if len(candidates)>=2:
+                scan_diagnostic={}
+                candidates=bounded_pointer_table(key,table,max_entries=dispatch_diagnostic.get('entry_limit',64),
+                    stop_at_targets=bool(dispatch_diagnostic),diagnostics=scan_diagnostic)
+                if len(candidates)>=dispatch_diagnostic.get('min_entries',2):
                     for target_key in candidates:
                         hl_table_targets.add(target_key);indirect_table_targets.add(target_key);add_rom_block(target_key)
+                        if dispatch_diagnostic and target_key in first:indexed_call_targets.add(target_key)
+                    if dispatch_diagnostic:
+                        return_key=rom_key(key,dispatch_diagnostic['return_address']);add_rom_block(return_key)
+                        if return_key in first:indexed_call_returns.add(return_key)
+                        indexed_call_reports.append(dict(bank=bank,pc=pc,table=table,
+                            helper=dispatch_diagnostic['helper'],return_address=dispatch_diagnostic['return_address'],
+                            entries=len(candidates),entry_limit=128,stop_reason=scan_diagnostic['stop_reason']))
     blocks=[]
     for (bank,pc),count in sorted(hits.items()):
         raw=first[(bank,pc)]; operand=(raw[1] if len(raw)==2 else (raw[1]|raw[2]<<8 if len(raw)==3 else 0))
@@ -950,11 +1017,11 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
                 block["idle_wait"]=True
     for block in blocks:block["native_lowered"]=native_body(block) is not None
     out.mkdir(parents=True,exist_ok=True)
-    (out/"trace-profile.json").write_text(json.dumps({"input":str(rom_path),"steps_per_scenario":steps,"auto_steps":auto_steps,"auto_inputs":auto_inputs,"total_steps_executed":sum(s["steps_executed"] for s in scenario_reports),"dynamic_unique_blocks":dynamic_unique_block_count,"indirect_table_targets":len(indirect_table_targets),"hl_pointer_table_targets":len(hl_table_targets),"bitmask_dispatch_targets":len(bitmask_targets),"rst_inline_table_targets":len(rst_table_targets),"banked_thunk_targets":len(banked_thunk_targets),"constant_bank_call_targets":len(constant_bank_targets),"constant_far_call_targets":len(far_call_targets),"constant_far_call_returns":len(far_call_returns),"banked_pointer_table_targets":len(far_table_targets),"banked_pointer_tables":far_table_reports,"bank_context_targets":len(bank_context_targets),"total_blocks_after_static_closure":len(blocks),"input_exploration":exploration_report,"scenarios":scenario_reports,"blocks":blocks},indent=2)+"\n")
+    (out/"trace-profile.json").write_text(json.dumps({"input":str(rom_path),"steps_per_scenario":steps,"auto_steps":auto_steps,"auto_inputs":auto_inputs,"total_steps_executed":sum(s["steps_executed"] for s in scenario_reports),"dynamic_unique_blocks":dynamic_unique_block_count,"indirect_table_targets":len(indirect_table_targets),"hl_pointer_table_targets":len(hl_table_targets),"bitmask_dispatch_targets":len(bitmask_targets),"rst_inline_table_targets":len(rst_table_targets),"banked_thunk_targets":len(banked_thunk_targets),"constant_bank_call_targets":len(constant_bank_targets),"constant_far_call_targets":len(far_call_targets),"constant_far_call_returns":len(far_call_returns),"banked_pointer_table_targets":len(far_table_targets),"banked_pointer_tables":far_table_reports,"bank_context_targets":len(bank_context_targets),"indexed_call_targets":len(indexed_call_targets),"indexed_call_returns":len(indexed_call_returns),"indexed_call_tables":indexed_call_reports,"ram_callback_targets":len(ram_callback_targets),"ram_callback_returns":len(ram_callback_returns),"ram_callback_records":ram_callback_report.get("records",[]),"ram_callback_analysis_limits":{"pair_limit_reached":ram_callback_report.get("pair_limit_reached",False),"exhausted_contexts":ram_callback_report.get("exhausted_contexts",[])},"total_blocks_after_static_closure":len(blocks),"input_exploration":exploration_report,"scenarios":scenario_reports,"blocks":blocks},indent=2)+"\n")
     emit_native_blocks(blocks,out)
     return blocks
 
-def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None):
+def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,include_block_table=True):
     """Emit validated block metadata without repeating reference discovery."""
     if max_hot_chains is not None and max_hot_chains<0:raise ValueError('negative hot chain limit')
     used=sorted({b["family"] for b in blocks if not b["native_lowered"]})
@@ -1099,7 +1166,8 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None):
             return result+tree(lo,mid,left)+tree(mid+1,hi,right)
         lines += tree(0,len(ordered),0)
     lines += ["\teven","gb_compiled_block_table:"]
-    for block in blocks: lines += [f"\tdc.w ${block['bank']:04X},${block['pc']:04X}",f"\tdc.l {label(block)}"]
+    if include_block_table:
+        for block in blocks: lines += [f"\tdc.w ${block['bank']:04X},${block['pc']:04X}",f"\tdc.l {label(block)}"]
     lines += ["\tdc.w $FFFF,$FFFF","\tdc.l 0"]
     (out/"translated_trace.s").write_text("\n".join(lines))
     (out/"native-codegen-report.json").write_text(json.dumps({
@@ -1107,6 +1175,8 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None):
         "compact_chain_targets":len(compact_targets),
         "hot_chain_targets":len(chain_targets)-len(compact_targets),
         "hot_chain_limit":max_hot_chains,
+        "block_catalog_included":include_block_table,
+        "block_catalog_bytes":8*(len(blocks)+1) if include_block_table else 8,
         "dispatch_format":"bank_page_table" if use_pages else "balanced_tree",
         "dispatch_pages":len(pages) if use_pages else 0,
         "dispatch_table_bytes":page_bytes if use_pages else 0},indent=2)+"\n")
