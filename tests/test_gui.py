@@ -40,6 +40,7 @@ class GuiHelpersTest(unittest.TestCase):
         window=ConverterWindow()
         try:
             self.assertTrue(window.auto_inputs.isChecked())
+            self.assertFalse(window.show_fps.isChecked())
             self.assertEqual(window.input_branches.value(),128)
             self.assertEqual(window.input_depth.value(),4)
             self.assertEqual(window.input_max_steps.value(),20_000_000)

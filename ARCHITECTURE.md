@@ -710,3 +710,37 @@ errors fail directly, and repeated convergence failure leaves any prior ROM
 intact. Original mocked-error tests cover retry bounds, one discovery pass,
 ordinary errors and preservation; the native chain A/B fixture exercises the
 actual non-convergent layout and successful fallback.
+
+## Optional GB clock speed HUD
+
+`build(..., show_fps=True)` / `--show-fps` defines `GB2MD_SHOW_FPS`, installs
+`gb_fps_vblank` at Genesis level6 vector `$78`, uploads an original17-glyph
+font from `fps_overlay.font_assembly()`, then enables only the needed host
+interrupt level after setup (`SR=$2500`). The optional assembly lives in
+`fps_overlay_68000.s`; it does not implement or change Game Boy interrupts.
+Normal builds keep the original vector table and masked host interrupts.
+
+The handler acknowledges VDP status, counts host VBlanks at `$FF0060`, and
+samples source-cycle progress every50 PAL or60 NTSC VBlanks, selected from the
+Genesis version register. The modular32-bit cycle difference survives counter
+wrap. Dividing by4 and then17,556 converts to nominal GB frames; scaling by10
+produces truncated tenths, saturated at9999. `fps_overlay.rate_tenths()` is the
+reference for the same arithmetic. The value at `$FF006C` represents GB clock
+progress per nominal hardware second, not rendered-image frequency or host
+wall time during fast-forward. The sample count is at `$FF0070`.
+
+The ISR saves d0-d4/a0 and returns with RTE, preserving the interrupted native
+instruction's state and condition codes. Renderer hooks hold `$FF006E` busy
+through its complete VDP transaction. While busy the ISR samples but defers
+HUD writes; control commands remain complete32-bit instructions. Unimplemented
+status-screen setup also holds the guard. Missing-block loops have no VDP
+transaction, allowing the independent sampler to display0.0 after source time
+stops. A paused or waiting source program may still advance its clock.
+
+The HUD uses Plane B cells(1,1)..(12,1), above the game viewport, font tiles
+644..660 (after source patterns and shell tiles), and shell palette entry15.
+It updates the12 tile names only when a new sample is ready; glyphs upload once
+at startup. Its RAM fields occupy `$FF0060..$FF0073`, outside GB-visible state
+and serial-test buffers. It is off by default and exposed by the GUI checkbox.
+Disabled-mode binary parity is checked against a prior verified fixture;
+forced PAL/NTSC and trapped-source tests validate enabled-mode timing.

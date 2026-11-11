@@ -68,7 +68,7 @@ def compiler_command(rom: Path, output: Path, steps: int, auto_steps: bool = Fal
                      auto_max_steps: int = 50_000_000, auto_inputs: bool = False,
                      input_max_branches: int = 128, input_max_depth: int = 4,
                      input_max_steps: int = 20_000_000,
-                     input_sweep_steps: int = 0) -> tuple[str, list[str]]:
+                     input_sweep_steps: int = 0, show_fps: bool = False) -> tuple[str, list[str]]:
     if input_sweep_steps<0 or (input_sweep_steps and not auto_inputs):
         raise ValueError('Long input sweeps require controller exploration.')
     arguments = [
@@ -87,6 +87,7 @@ def compiler_command(rom: Path, output: Path, steps: int, auto_steps: bool = Fal
                       "--input-max-steps", str(input_max_steps)]
         if input_sweep_steps:
             arguments += ["--input-sweep-steps", str(input_sweep_steps)]
+    if show_fps:arguments.append("--show-fps")
     return sys.executable, arguments
 
 
@@ -148,6 +149,9 @@ class ConverterWindow(QMainWindow):
             control.setEnabled(True)
             self.auto_inputs.toggled.connect(control.setEnabled)
 
+        self.show_fps = QCheckBox("Show simulated Game Boy FPS in the border")
+        self.show_fps.setToolTip("Measures GB clock progress per nominal hardware second, not distinct rendered frames. Optional diagnostic overhead.")
+
         form = QFormLayout()
         form.setSpacing(14)
         form.addRow("Game Boy ROM", self._picker_row(self.rom_edit, rom_button))
@@ -160,6 +164,7 @@ class ConverterWindow(QMainWindow):
         form.addRow("Input depth", self.input_depth)
         form.addRow("Input safety limit", self.input_max_steps)
         form.addRow("Long input sweep", self.input_sweep_steps)
+        form.addRow("Speed counter", self.show_fps)
 
         self.compile_button = QPushButton("Compile ROM")
         self.compile_button.setObjectName("compileButton")
@@ -268,7 +273,7 @@ class ConverterWindow(QMainWindow):
                 return
 
         output.mkdir(parents=True, exist_ok=True)
-        program, arguments = compiler_command(rom, output, self.steps.value(), self.auto_steps.isChecked(), self.auto_max.value(), self.auto_inputs.isChecked(), self.input_branches.value(), self.input_depth.value(), self.input_max_steps.value(),self.input_sweep_steps.value() if self.auto_inputs.isChecked() else 0)
+        program, arguments = compiler_command(rom, output, self.steps.value(), self.auto_steps.isChecked(), self.auto_max.value(), self.auto_inputs.isChecked(), self.input_branches.value(), self.input_depth.value(), self.input_max_steps.value(),self.input_sweep_steps.value() if self.auto_inputs.isChecked() else 0,self.show_fps.isChecked())
         self.output_path = output
         self.log.clear()
         self.log.appendPlainText("$ " + shlex.join([program, *arguments]))

@@ -4,6 +4,47 @@
 
 
 
+
+## Optional simulated Game Boy speed overlay — 2026-11-11
+
+The GUI now has a **Speed counter** checkbox, "Show simulated Game Boy FPS in
+the border"; the CLI equivalent is `--show-fps`. It is off by default. Restart
+the GUI and recompile to add it to a ROM. The upper-left border displays
+`GB FPS 017.2` without covering the160x144 viewport.
+
+This measures source clock progress: change in `gb_cycle_counter` divided by
+70,224 T-cycles per nominal GB frame, over60 NTSC or50 PAL Genesis VBlanks.
+It is a one-second, one-decimal estimate in nominal Genesis time, not distinct
+rendered pictures or a proof of gameplay progress. An accelerated emulator
+still reports the hardware-normalized rate. Very slow or bursty execution can
+make successive one-second values fluctuate. A paused game can still execute
+source cycles. The display saturates at999.9.
+
+An optional native level6 VBlank handler samples independently of source
+execution; a missing-block trap therefore settles to0.0 instead of freezing
+the last displayed number. The handler preserves native temporaries and only
+writes the HUD when the renderer's VDP transaction guard is clear. The font is
+original source data, using tiles644..660 and a reserved shell-palette entry.
+
+Focused native tests pass on forced NTSC and PAL, matching displayed numeric
+samples to observed source-cycle deltas. A deliberately incomplete original
+fixture verifies the zero-rate trap case. The visual original-ROM preview
+shows a readable border counter. An enabled-overlay GUI subprocess build and
+cancellation check pass. With the option disabled, a fresh timer fixture ROM
+is byte-identical to its previously native-verified image.
+
+An original register-loop A/B test measured0.9972x throughput with the HUD
+versus off (about0.3% overhead in that workload). This is not a general game
+performance bound. Default builds have no overlay code or interrupt hooks.
+**174/174 tests PASS with native integration enabled** in486 seconds
+(162 ordinary and12 opt-in native methods); the public fast suite passes162
+with12 native methods skipped. The first full run sampled the trapped-source
+fixture before reset initialization completed; its bounded startup window was
+extended to600 Genesis frames while retaining all readiness/trap assertions.
+The successful full rerun includes that corrected test. No copyrighted assets,
+commercial game images, screenshots or generated game code are published.
+
+
 ## IF/IE interrupt ordering correctness — 2026-11-11
 
 The native runtime now synchronizes writes to interrupt request IF ($FF0F)

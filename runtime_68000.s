@@ -1354,6 +1354,9 @@ gb_dma_advance:
 ; Plane A is at $C000; tile patterns occupy $0000-$2FFF.  The routine runs at
 ; emulated VBlank and therefore displays original game state, not baked assets.
 gb_render_frame:
+	ifd GB2MD_SHOW_FPS
+	move.b #1,gb_fps_vdp_busy
+	endif
 	addq.l #1,gb_render_count
 	movem.l d0-d7/a0-a2,-(sp)
 	; OAM changes are common during gameplay and do not require reconverting
@@ -1678,6 +1681,9 @@ gb_render_frame:
 	clr.b gb_oam_dirty
 	clr.b gb_bg_dirty
 	move.w #$8174,$C00004
+	ifd GB2MD_SHOW_FPS
+	clr.b gb_fps_vdp_busy
+	endif
 	movem.l (sp)+,d0-d7/a0-a2
 	rts
 
