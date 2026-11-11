@@ -168,9 +168,24 @@ gb_cart_rom:
     assembly=out/"recompiled_rom.s";assembly.write_text(main)
     binary=out/"recompiled.md";assembler=find_assembler(assembler)
     raw_binary=out/"recompiled.raw.bin"
-    layout_attempts=[]
+    layout_attempts=[];assembler_options=[];assembler_retries=[]
+    def assembly_output(result):
+        for stream in (getattr(result,'stdout',None),getattr(result,'stderr',None)):
+            if stream:print(stream,end='' if stream.endswith('\n') else '\n',flush=True)
     while True:
-        subprocess.run([str(assembler),"-m68000","-Fbin",str(assembly),"-o",str(raw_binary)],check=True)
+        command=[str(assembler),"-m68000",*assembler_options,"-Fbin",str(assembly),"-o",str(raw_binary)]
+        try:
+            assembled=subprocess.run(command,check=True,capture_output=True,text=True)
+        except subprocess.CalledProcessError as exc:
+            assembly_output(exc)
+            diagnostic=(exc.stdout or '')+(exc.stderr or '')
+            if not assembler_options and 'maximum number of passes reached' in diagnostic.lower():
+                assembler_options=['-no-opt']
+                assembler_retries.append({'reason':'assembler layout did not converge','options':list(assembler_options)})
+                print('Assembler layout did not converge; retrying once with assembler optimizations disabled (-no-opt). Native code coverage is retained.',flush=True)
+                continue
+            raise
+        assembly_output(assembled)
         image=bytearray(raw_binary.read_bytes());size=max(0x80000,(len(image)+1)&~1)
         codegen_path=out/'native-codegen-report.json'
         codegen=json.loads(codegen_path.read_text()) if codegen_path.exists() else {}
@@ -178,7 +193,7 @@ gb_cart_rom:
         catalog=codegen.get('block_catalog_included',bool(codegen))
         layout_attempts.append({'rom_bytes':size,'hot_chain_targets':hot,
                                 'hot_chain_limit':codegen.get('hot_chain_limit'),
-                                'block_catalog_included':catalog})
+                                'block_catalog_included':catalog,'assembler_optimizations':not bool(assembler_options)})
         if size<=0x400000:break
         if catalog and not keep_rom_catalog:
             print('Native image exceeds 4 MiB; omitting the unused duplicate ROM block catalog (dispatch entries and trace reports retained). Use --keep-rom-catalog to require it.',flush=True)
@@ -215,6 +230,8 @@ gb_cart_rom:
         "native_blocks":sum(b["native_lowered"] for b in blocks),"unlowered_families":missing,
         "rom_bytes":size,"checksum":checksum}
     build_report['native_layout_attempts']=layout_attempts
+    build_report['assembler_options']=list(assembler_options)
+    build_report['assembler_retries']=assembler_retries
     (out/"build-report.json").write_text(json.dumps(build_report,indent=2)+"\n")
     return binary
 def main():

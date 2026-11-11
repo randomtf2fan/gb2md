@@ -270,6 +270,7 @@ gb_write8:
 	blo.w .io
 	cmpi.w #$FFFF,d1
 	blo.w .hram
+	bsr.w gb_irq_write_barrier
 	move.b d0,gb_ie
 	bra.w .done
 .write_low:
@@ -474,6 +475,8 @@ gb_write8:
 	rts
 .io:
 	subi.w #$FF00,d1
+	cmpi.w #$000F,d1
+	beq.s .io_flush_irq_timing
 	cmpi.w #$0046,d1
 	beq.s .io_flush_timing
 	cmpi.w #$0004,d1
@@ -491,6 +494,9 @@ gb_write8:
 	move.b #1,gb_force_tick
 	clr.b gb_step_cycles
 	movem.l (sp)+,d0-d2/a0
+	bra.s .io_timing_synced
+.io_flush_irq_timing:
+	bsr.w gb_irq_write_barrier
 .io_timing_synced:
 	lea gb_io,a0
 	moveq #0,d2
@@ -653,6 +659,23 @@ gb_write8:
 	subi.w #$FF80,d1
 	lea gb_hram,a0
 	move.b d0,(a0,d1.w)
+	rts
+
+; IF/IE writes must arbitrate at the following instruction, not at a later
+; scheduler batch. Commit prior cycles before the write, defer service until
+; the opcode completes, and preserve temporaries used by word/stack stores.
+gb_irq_write_barrier:
+	movem.l d0-d6/a0-a1,-(sp)
+	moveq #0,d0
+	move.b gb_defer_irq,d0
+	move.w d0,-(sp)
+	move.b #1,gb_defer_irq
+	bsr.w gb_tick
+	move.w (sp)+,d0
+	move.b d0,gb_defer_irq
+	move.b #1,gb_force_tick
+	clr.b gb_step_cycles
+	movem.l (sp)+,d0-d6/a0-a1
 	rts
 
 ; d3.w = divider, d2.b = TAC; returns d4.w nonzero when timer input is high.

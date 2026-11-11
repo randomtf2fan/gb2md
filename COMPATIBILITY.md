@@ -3,6 +3,60 @@
 
 
 
+
+## IF/IE interrupt ordering correctness — 2026-11-11
+
+The native runtime now synchronizes writes to interrupt request IF ($FF0F)
+and enable IE ($FFFF). Previously, an eligible interrupt could remain pending
+while subsequent translated instructions executed until the next cycle-batch
+boundary. It could expose pre-interrupt register values or save the wrong
+return PC. This was a runtime execution defect, not just insufficient tracing.
+
+Two original ROM scenarios independently reproduced the failure: requesting
+an enabled interrupt or enabling a pending one gave native observations4,5
+where the reference expected5,5. The first observation now matches. Additional
+fixtures cover disabled IME, delayed EI and a stack PUSH touching IE.
+`gb_irq_write_barrier()` drains pending cycles with service deferred, preserves
+caller temporaries and the previous deferral state, then forces arbitration
+at opcode completion using the updated register. The original timer/DMA write
+paths and constant-cycle optimization remain in place.
+
+Blargg02-interrupts now passes in fresh Python and native diagnostic serial
+execution. The before/after profiles contain exactly the same440 instruction
+entries and400,000 trace steps: no extra RAM roots or test-specific code were
+added. Its earlier missing `$C1B9` entry was on an error-reporting path reached
+because of the delayed interrupt. Blargg04-op r,imm and05-op rp also pass in
+fresh Python/native runs. Eight individual CPU cases now have recorded native
+passes;09/10/11 remain NOT_RUN. Five of those eight passes are historical and
+were not all rerun with this runtime; the three fresh cases are02/04/05.
+
+Fresh timer/reg_f checks pass14/14 in both Python and native execution.
+**169/169 tests PASS with native integration enabled** in466 seconds
+(158 ordinary and11 opt-in native methods). The public fast suite passes158
+with11 native methods skipped. The first full run
+exposed a vasm layout convergence failure in the scheduler comparison fixture;
+this is preserved in the development logs. The builder now retries that
+specific assembler pass-limit error once with `-no-opt`, retaining all code
+and coverage and recording the mode. Other assembler errors fail directly;
+repeated failures preserve the previous ROM. Normal successful builds retain
+assembler optimization. Original error-injection tests check retry bounds and
+preservation; the native fixture covers the real failing layout.
+
+No commercial game was newly gameplay-tested in this pass, and there is no
+new speed claim. Existing checkpoints remain intact. This does not establish
+cycle-exact interrupt entry/cancellation behavior or universal compatibility.
+
+Reproduce the corrected native protocol with external vasm and BlastEm:
+
+```sh
+python3 run_compat_tests.py test_roms/blargg/cpu_instrs/individual/02-interrupts.gb \
+  --max-steps 400000 --compile-native --native-steps 400000 \
+  --run-native-blastem --blastem /path/to/blastem --native-frames 3600 \
+  --native-timeout 75 --native-output compat-builds/irq-write-blargg02 \
+  --json compat-results/irq-write-blargg02.json
+```
+
+
 ## Measured native scheduler improvement — 2026-11-11
 
 Normal native builds now specialize hot chain targets whose statically linked

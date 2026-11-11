@@ -674,3 +674,39 @@ they are not game FPS or a full-system bottleneck profile. Original native
 regressions compare timer-read results, register/stack state, EI/IRQ/HALT and
 mapper behavior with both modes. Existing timer and integration suites remain
 required before accepting backend changes.
+
+## IF/IE write ordering barrier (2026-11-11)
+
+Interrupt request IF ($FF0F) and enable IE ($FFFF) writes now use
+`gb_irq_write_barrier()` from `gb_write8`. Previously, normal direct chaining
+could execute additional source instructions before the batch reached its
+200-T-cycle limit, even when the write made an interrupt immediately eligible.
+This could save a later interrupt return PC or expose pre-interrupt register
+values to the following instruction. Missing native error-report code could
+then obscure the underlying execution difference.
+
+The barrier commits pending cycles before changing the register while IRQ
+service is deferred, restores the prior deferral state, clears the charged
+instruction cost and sets `gb_force_tick`. At the opcode's normal completion
+boundary, arbitration therefore uses the new IF/IE state before entering the
+next instruction. It preserves d0-d6/a0-a1, including temporaries used by
+multi-byte stack stores; the existing cycle accumulator is committed normally.
+Normal timer/DMA write handling remains in its previous path.
+
+Original fixtures independently reproduce request-write and enable-write
+latency: Python stored5 at the first observation while native stored4, then
+later5. Both now match, alongside disabled-IME, delayed-EI and a PUSH that
+writes IE through stack wraparound. This is a general I/O ordering fix, not
+a test-specific target seed. It does not establish every cycle-exact interrupt
+entry/cancellation edge or arbitrary self-modifying RAM coverage.
+
+When vasm reports its specific "maximum number of passes reached" layout
+convergence error, `build()` retries the same generated assembly once with
+`-no-opt`. This disables assembler instruction/size optimizations, not native
+recompilation or trace coverage. The flag persists through capacity retries.
+`assembler_options`, `assembler_retries` and each layout attempt record the
+mode; successful normal builds keep the existing assembler defaults. Other
+errors fail directly, and repeated convergence failure leaves any prior ROM
+intact. Original mocked-error tests cover retry bounds, one discovery pass,
+ordinary errors and preservation; the native chain A/B fixture exercises the
+actual non-convergent layout and successful fallback.
