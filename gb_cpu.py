@@ -349,9 +349,18 @@ class CPU:
         if pending:
             self.halted=False
             if self.ime:
-                bit=(pending & -pending).bit_length()-1
-                self.ime=False; self.m.io[0x0F] &= ~(1<<bit)
-                self.idle_cycle();self.idle_cycle();self.idle_cycle();self.push(self.pc);self.pc=0x40+bit*8
+                self.ime=False
+                self.idle_cycle();self.idle_cycle()
+                # The upper PC push may overwrite IE. Select/acknowledge
+                # afterwards; a lower-byte IE write is too late to cancel.
+                self.sp=(self.sp-1)&0xFFFF;self.write_cycle(self.sp,self.pc>>8)
+                selected=self.m.io[0x0F] & self.m.ie & 0x1F
+                vector=0
+                if selected:
+                    bit=(selected & -selected).bit_length()-1
+                    self.m.io[0x0F] &= ~(1<<bit);vector=0x40+bit*8
+                self.sp=(self.sp-1)&0xFFFF;self.write_cycle(self.sp,self.pc&255)
+                self.idle_cycle();self.pc=vector
                 return
         if self.halted: self.idle_cycle(); return
         op=self.fetch8(); self.opcode_count[op]+=1

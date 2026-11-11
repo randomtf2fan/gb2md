@@ -1,5 +1,57 @@
 # GB2MD compatibility status
 
+## Interrupt-entry correction and extended native CPU validation — 2026-11-11
+
+The interrupt stack push selected and acknowledged a request too early in the
+reference CPU. The upper return-PC byte can overwrite IE through stack wrap,
+changing priority or cancelling dispatch. Selection now happens after that
+write; a later low-byte IE write does not change the selected vector.
+The native runtime follows the same ordering and now charges the missing
+20 T-cycles for entry through the existing timer/PPU/DMA scheduler.
+No game title, hash, address rule or interpreter fallback was added.
+
+Validation completed before publication:
+
+- Full native-enabled unit suite: **178/178 PASS**, including 13 native methods,
+  in 527.385 seconds. Public fast suite: **165 PASS, 13 skipped**.
+- Five selected Mooneye control ROMs: Python and native PASS (`ei_sequence`,
+  `ei_timing`, `rapid_di_ei`, `halt_ime0_ei`, `interrupts/ie_push`). The latter
+  failed in Python before the correction. Original synthetic regressions cover
+  normal entry, high-push cancellation, low-push IE changes and reselection.
+- Fresh native Blargg 09 passed on the preceding published runtime; 10 passed
+  on this corrected runtime after 20,700 Genesis frames, independently observed
+  serial `Passed`, with zero missing-block diagnostics. CPU 11 also passed on
+  the corrected runtime after 25,200 Genesis frames, with zero diagnostics.
+  All eleven individual CPU tests now have recorded native passes across
+  sessions; tests 01–08 were not all rerun against this runtime.
+
+The separate fresh timer/register rerun passed **14/14 in Python and native
+execution** (13 Mooneye timers plus `bits/reg_f`). The initial CPU 10/11
+18,000-frame runs exhausted their observation budget while still progressing;
+longer bounded observation produced the passes above. Later desktop-window
+closures interrupted two reruns and are not guest correctness failures.
+Earlier dated sections below are historical results, including older NOT_RUN
+entries; they do not override the latest observations. This pass does not
+establish full instruction-timing accuracy, rendering correctness, playable
+new games or improved speed. Known-good checkpoints remain unchanged.
+
+Automated tests on the development machine now use an isolated Xvfb display
+with SDL explicitly forced to X11, software video and dummy audio. The local
+wrapper refuses to fall back to the user's desktop. No display wrapper,
+compiled test ROM, trace or debugger log is distributed in the source tree.
+
+Reproduce the unit regression with external dependencies configured:
+
+```sh
+GB2MD_NATIVE_TESTS=1 GB2MD_BLASTEM=/path/to/isolated-blastem-wrapper GB2MD_VASM=/path/to/vasmm68k_mot python3 -m unittest discover -s tests -q
+```
+
+The immutable external fixtures can be selected with `run_compat_tests.py`.
+For example, CPU 10 uses 7,500,000 discovery steps, CPU 11 uses 8,000,000;
+allow up to 27,000 Genesis frames and a 600-second native timeout. These are
+bounded validation settings, not general game-compilation recommendations.
+
+
 
 
 

@@ -675,6 +675,32 @@ regressions compare timer-read results, register/stack state, EI/IRQ/HALT and
 mapper behavior with both modes. Existing timer and integration suites remain
 required before accepting backend changes.
 
+## Interrupt stack entry and cancellation (2026-11-11)
+
+In `CPU._step_base`, accepting an interrupt clears IME, spends two idle
+machine cycles, pushes the high return-PC byte, then selects and acknowledges
+an enabled request using the current IF and IE. The low byte is pushed next;
+a final machine cycle completes entry. Total cost is 20 T-cycles, with writes
+at T12 and T16 in the reference bus model. If the upper stack write disables
+all pending requests through IE, entry still consumes IME and the stack writes
+but selects address $0000. A low-byte IE write happens after selection.
+
+The native `gb_tick` follows the same sequence. `gb_irq_advance` advances the
+existing peripheral scheduler in 12/4/4-T-cycle phases while preserving native
+temporaries. `gb_irq_entry` at $FF0058 suppresses an extra IF/IE write-barrier
+tick during those already charged writes; `gb_defer_irq` prevents recursive
+arbitration. Both are cleared before execution resumes at the selected vector.
+Previously the native stack push charged no source interrupt-entry cycles.
+This correction does not change instruction budgets or introduce game rules.
+
+`tests/test_irq_entry.py` builds original synthetic programs for normal entry,
+upper-push cancellation, a late low-push IE change, and priority reselection.
+Reference tests also assert the two bus-write times, SP, IME and pending IF.
+Opt-in native tests independently compare recorded memory and diagnostic state.
+The external Mooneye `interrupts/ie_push` fixture is a further compatibility
+check; its binary is not bundled. This is not a claim that every IF edge,
+DMA interaction or interrupt timing corner is cycle-exact.
+
 ## IF/IE write ordering barrier (2026-11-11)
 
 Interrupt request IF ($FF0F) and enable IE ($FFFF) writes now use

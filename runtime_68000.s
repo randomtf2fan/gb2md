@@ -51,6 +51,7 @@ gb_mbc1_upper equ $FF0054
 gb_stat_line equ $FF0055
 gb_window_full equ $FF0056
 gb_bank_dirty equ $FF0057
+gb_irq_entry equ $FF0058
 gb_io equ $FF0100
 gb_hram equ $FF0180
 gb_oam equ $FF0200
@@ -665,6 +666,12 @@ gb_write8:
 ; scheduler batch. Commit prior cycles before the write, defer service until
 ; the opcode completes, and preserve temporaries used by word/stack stores.
 gb_irq_write_barrier:
+	tst.b gb_irq_entry
+	beq.s .normal_write
+	; The interrupt-entry sequencer already charged this bus phase.
+	move.b #1,gb_force_tick
+	rts
+.normal_write:
 	movem.l d0-d6/a0-a1,-(sp)
 	moveq #0,d0
 	move.b gb_defer_irq,d0
@@ -1164,7 +1171,27 @@ gb_tick:
 	tst.b gb_ime
 	beq.w .tick_done
 	clr.b gb_ime
-	; Lowest pending bit has priority. d2 is bit mask, d3 is vector.
+	move.b #1,gb_irq_entry
+	move.b #1,gb_defer_irq
+	move.w gb_pc,d4
+	; Two idle M-cycles followed by the high-byte stack-write M-cycle.
+	moveq #12,d0
+	bsr.w gb_irq_advance
+	move.w gb_sp,d1
+	subq.w #1,d1
+	move.w d1,gb_sp
+	move.w d4,d0
+	lsr.w #8,d0
+	movem.l d3-d4,-(sp)
+	bsr.w gb_write8
+	movem.l (sp)+,d3-d4
+	; IE can change during that push: recompute priority before ack.
+	move.b gb_io+$0F,d0
+	and.b gb_ie,d0
+	andi.b #$1F,d0
+	moveq #0,d3                    ; cancellation enters fixed ROM $0000
+	tst.b d0
+	beq.s .irq_selected
 	moveq #1,d2
 	move.w #$0040,d3
 .find_irq:
@@ -1177,21 +1204,33 @@ gb_tick:
 .take_irq:
 	not.b d2
 	and.b d2,gb_io+$0F
+.irq_selected:
+	moveq #4,d0
+	bsr.w gb_irq_advance
 	move.w gb_sp,d1
-	subq.w #2,d1
+	subq.w #1,d1
 	move.w d1,gb_sp
-	move.w gb_pc,d4
-	move.w d1,d5
-	addq.w #1,d1
 	move.w d4,d0
-	lsr.w #8,d0
-	bsr.w gb_write8
-	move.w d5,d1
-	move.w d4,d0
-	bsr.w gb_write8
+	movem.l d3-d4,-(sp)
+	bsr.w gb_write8                 ; low-byte IE write cannot change selection
+	movem.l (sp)+,d3-d4
+	moveq #4,d0
+	bsr.w gb_irq_advance            ; final vector-load M-cycle (20T total)
+	clr.b gb_irq_entry
+	clr.b gb_defer_irq
 	clr.w gb_bank
 	move.w d3,gb_pc
 .tick_done:
+	rts
+; Charge one interrupt-entry phase without recursive IRQ arbitration.
+; d0.w is T-cycles. Keep stack-pointer/vector temporaries live across gb_tick.
+gb_irq_advance:
+	movem.l d0-d6/a0-a1,-(sp)
+	move.b d0,gb_step_cycles
+	move.b #1,gb_defer_irq
+	bsr.w gb_tick
+	clr.b gb_step_cycles
+	movem.l (sp)+,d0-d6/a0-a1
 	rts
 gb_timer_periods:
 	dc.w 1024,16,64,256
