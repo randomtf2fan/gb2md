@@ -2,6 +2,66 @@
 
 
 
+
+## Measured native scheduler improvement — 2026-11-11
+
+Normal native builds now specialize hot chain targets whose statically linked
+predecessors all have the same proven register-only instruction cost. This
+removes redundant cycle-cost RAM stores/loads and updates the existing batch
+register directly. Memory/I/O instructions, mapper effects, control flow,
+EI/DI, HALT/STOP and ambiguous incoming costs retain the old path. The existing
+200-T-cycle threshold, forced synchronization, delayed EI and IRQ/bank/PC
+validation remain. No runtime, Python CPU, timer, DMA or rendering semantics
+were modified. `--no-chain-opt` restores the previous scheduler for comparison.
+The GUI uses the default enabled backend after restart and recompilation.
+
+Original native benchmark results at equal Genesis frame counts:
+
+| Workload | Source-cycle throughput improvement |
+|---|---:|
+| Register operations | 21.7% |
+| RAM read/write loop | 4.9% |
+| Tile/video-update loop | 9.0% |
+
+These are bounded synthetic workloads, not whole-game FPS. A private Tetris
+comparison reused identical preserved coverage and the same runtime, measuring
+a no-input interval between Genesis frames1200 and1800. Source clock progress
+rose from15.80 to17.20 simulated GB frames/second normalized to60 Genesis
+frames/second (8.9%); neither run hit a missing-block trap. Game phases may
+vary, so this is a boot/title workload result, not matched gameplay FPS or
+full-speed compatibility. The image shrank from795,818 to783,360 bytes while
+retaining all7,187 entries. The disabled backend reproduces the preserved
+original tree-dispatch assembly byte for byte.
+
+**165/165 tests PASS with native integration enabled** in447 seconds
+(155 ordinary and10 opt-in native methods). The public fast suite passes155
+with10 native methods skipped. New original regressions compare both modes
+for CPU/timer reads, stack state, delayed EI, IRQ/HALT and mapper behavior, and
+check mixed predecessors and compact-mode fallback. Fresh timer/reg_f tests
+pass14/14 in both Python and native Genesis execution with optimization enabled.
+The GUI completed a current-backend original-ROM build and cancellation check.
+Blargg08-misc instrs also passes again in fresh Python and native diagnostic
+serial execution with the optimized backend.
+
+Known coverage, rendering, audio and native interrupt-test limitations remain;
+no new gameplay coverage is claimed. Existing ROMs/checkpoints are preserved.
+Benchmark and regression source are redistributable originals; commercial ROMs,
+generated game code, private logs and ROM images are not published.
+
+Reproduce synthetic measurements with separately installed vasm and BlastEm:
+
+```sh
+GB2MD_BLASTEM=/path/to/blastem GB2MD_VASM=/path/to/vasmm68k_mot \
+  python3 benchmark_chains.py --out compat-builds/chain-benchmark --frames 180
+```
+
+`native-codegen-report.json` exposes `constant_cycle_chain_targets` and
+`elided_cycle_stores`. Capacity retries preserve the chosen mode, retain every
+entry and may reduce specialization with the hot-stub quota. This optimization
+is incremental; broader register allocation and rendering work remain future
+performance investigations.
+
+
 ## General native CPU validation and writable code — 2026-11-09
 
 This pass focuses on reusable CPU-test infrastructure rather than any game.

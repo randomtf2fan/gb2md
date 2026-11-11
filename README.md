@@ -92,11 +92,11 @@ all obligations are reviewed. BlastEm is optional and likewise treated as an
 external local test dependency.
 
 The `test_roms/` collection and all input `.gb`/`.gbc` files are local fixtures
-and are ignored by the repository safety rules. The 151 focused unit tests use
+and are ignored by the repository safety rules. The 155 focused unit tests use
 synthetic data and do not require commercial ROMs. Compatibility-suite runs
 require the user to supply the relevant test ROMs separately.
 
-Nine additional native integration methods use original diagnostic ROMs
+Ten additional native integration methods use original diagnostic ROMs
 generated from test source: controller rows, static dispatch discovery, compact
 scheduler interrupt/mapper paths, missing dispatch slots/pages/banks, and
 far-call bank restoration, indexed record/RAM callbacks and preserving indexed calls. Enable them with `GB2MD_NATIVE_TESTS=1`, `GB2MD_BLASTEM=/path/to/blastem` and
@@ -319,3 +319,11 @@ hardware serial implementation. The standalone `--test-serial` build option is
 for diagnostics only and is disabled in normal builds and the GUI. Finite
 observed WRAM/echo code variants are now compiled natively; unknown variants
 still trap and arbitrary self-modifying code is not fully supported.
+
+Native builds now specialize fixed-cycle register-only chain edges when all
+statically linked predecessors agree on the cost. Normal GUI/CLI builds enable
+this automatically after recompilation. `--no-chain-opt` restores the prior
+scheduler for comparison. Timing boundaries, interrupt checks and memory/I/O
+paths retain their existing behavior. `native-codegen-report.json` reports
+specialized targets and omitted cycle-cost stores. `benchmark_chains.py` uses
+original synthetic ROMs to compare throughput; those ratios are not game FPS.

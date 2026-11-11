@@ -1022,13 +1022,24 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
     emit_native_blocks(blocks,out)
     return blocks
 
-def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,include_block_table=True):
+def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,include_block_table=True,optimize_pure_chains=True):
     """Emit validated block metadata without repeating reference discovery."""
     if max_hot_chains is not None and max_hot_chains<0:raise ValueError('negative hot chain limit')
     used=sorted({b["family"] for b in blocks if not b["native_lowered"]})
     label=lambda b:f"L_gb_B{b['bank']:03X}_{b['pc']:04X}"
     block_by_key={(b["bank"],b["pc"]):b for b in blocks}
-    chain_targets=set()
+    chain_targets=set();incoming_costs=collections.defaultdict(set);source_edges=collections.defaultdict(set)
+    def pure_cycles(block,body):
+        op=block["opcode"]
+        register_only=(op in (0,0x01,0x11,0x21,0x31,0x03,0x13,0x23,0x33,0x0B,0x1B,0x2B,0x3B,0x07,0x0F,0x17,0x1F,0x27,0x2F,0x37,0x3F,0xE8,0xF8,0xF9)
+                       or op<0x40 and op&7 in (4,5,6) and (op>>3)&7!=6
+                       or 0x40<=op<0x80 and op&7!=6 and (op>>3)&7!=6
+                       or 0x80<=op<0xC0 and op&7!=6
+                       or op in (0xC6,0xCE,0xD6,0xDE,0xE6,0xEE,0xF6,0xFE)
+                       or op==0xCB and block["operand"]&7!=6)
+        if register_only and not any(line.startswith("jsr ") for line in body):
+            return instruction_cycles(op,block["operand"],False)
+        return None
     pc_store=re.compile(r"move\.w #\$([0-9A-Fa-f]{4}),gb_pc$")
     def thread_static_dispatch(block,body):
         """Direct-link constant successors while preserving IRQ/bank checks."""
@@ -1051,8 +1062,29 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
                 # so avoid one absolute RAM write per emulated instruction.
                 if current_store_index is not None:result[current_store_index]=None
                 result.append(f"jmp gb_chain_B{target_key[0]:03X}_{target_key[1]:04X}");chain_targets.add(target_key)
+                incoming_costs[target_key].add(pure_cycles(block,body))
+                source_edges[(block["bank"],block["pc"],block["bytes"])].add(target_key)
             else:result.append(statement)
         return [statement for statement in result if statement is not None]
+    # Discover incoming edge costs first: a shared target can use a constant
+    # only when EVERY statically chained predecessor has the same safe cost.
+    threaded_bodies={}
+    for block in blocks:
+        variants=[block]
+        for raw_hex in block.get("observed_variants",[]):
+            raw=bytes.fromhex(raw_hex)
+            variants.append({**block,"opcode":raw[0],"operand":raw[1] if len(raw)==2 else (raw[1]|raw[2]<<8 if len(raw)==3 else 0),"bytes":raw_hex,"family":family(raw[0]),"observed_variants":[]})
+        for index,variant in enumerate(variants):
+            if len(variants)>1:variant={**variant,"variant_suffix":f"_V{index}"}
+            body=native_body(variant)
+            if body is not None:
+                threaded_bodies[(variant['bank'],variant['pc'],variant['bytes'])]=thread_static_dispatch(variant,body)
+    hot_candidates=sorted((key for key in chain_targets if block_by_key[key]['hits']>0),
+                          key=lambda key:(-block_by_key[key]['hits'],key))
+    hot_targets=set(hot_candidates if max_hot_chains is None else hot_candidates[:max_hot_chains])
+    constant_costs={key:next(iter(costs)) for key,costs in incoming_costs.items()
+                    if optimize_pure_chains and key in hot_targets and len(costs)==1 and None not in costs}
+    elided_cycle_stores=0
     entry=next((b for b in blocks if b["bank"] == 0 and b["pc"] == 0x100),blocks[0])
     lines=["; Trace-guided static LR35902 -> 68000 block output.","\txdef gb_compiled_entry,gb_compiled_block_table,gb_dispatch_tree"]
     lines += ["gb_compiled_entry:",f"\tbra.w {label(entry)}",""]
@@ -1093,9 +1125,14 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
         for index,variant in enumerate(variants):
             if len(variants)>1:
                 lines.append(f".dynamic_variant_{block['bank']:03X}_{block['pc']:04X}_{index}:")
-            lines.append(f"\tmove.b #{instruction_cycles(variant['opcode'],variant['operand'],False)},gb_step_cycles")
-            direct=native_body(variant)
-            if direct is not None: lines += [f"\t{x}" for x in thread_static_dispatch(variant,direct)]+[""]
+            identity=(variant['bank'],variant['pc'],variant['bytes'])
+            edges=source_edges.get(identity,set())
+            elide=bool(edges) and all(target in constant_costs for target in edges)
+            if not elide:
+                lines.append(f"\tmove.b #{instruction_cycles(variant['opcode'],variant['operand'],False)},gb_step_cycles")
+            else:elided_cycle_stores+=1
+            direct=threaded_bodies.get(identity)
+            if direct is not None: lines += [f"\t{x}" for x in direct]+[""]
             else:
                 lines += [f"\tmove.w #${variant['bank']:04X},gb_bank",f"\tmove.w #${variant['pc']:04X},gb_pc",
                           f"\tmove.b #${variant['opcode']:02X},gb_opcode",f"\tmove.w #${variant['operand']:04X},gb_operand",
@@ -1104,9 +1141,6 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
     # gb_tick may redirect execution for an IRQ, so validate PC/bank before
     # entering the successor. Returns, JP (HL), mapper changes, and IRQ entry
     # continue through the general dispatcher below.
-    hot_candidates=sorted((key for key in chain_targets if block_by_key[key]['hits']>0),
-                          key=lambda key:(-block_by_key[key]['hits'],key))
-    hot_targets=set(hot_candidates if max_hot_chains is None else hot_candidates[:max_hot_chains])
     compact_targets=chain_targets-hot_targets
     for bank,target in sorted(chain_targets):
         stem=f"B{bank:03X}_{target:04X}"
@@ -1118,7 +1152,16 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
             lines += [f"gb_chain_{stem}:",f"\tmove.w #${target:04X},d0",f"\tmove.w #${bank:04X},d1",
                       f"\tpea {label(block_by_key[(bank,target)])}","\tjmp gb_chain_compact",""]
             continue
-        lines += [f"gb_chain_{stem}:","\ttst.b gb_force_tick",f"\tbne.s .chain_flush_{stem}","\ttst.b gb_ei_delay",f"\tbne.s .chain_flush_{stem}","\tmoveq #0,d0","\tmove.b gb_step_cycles,d0","\tmoveq #0,d1","\tmove.w d7,d1","\tadd.w d0,d1",f"\tcmpi.w #{SCHEDULER_BATCH_T_CYCLES},d1",f"\tbhs.s .chain_flush_{stem}","\tmove.w d1,d7",f"\tjmp {label(block_by_key[(bank,target)])}",f".chain_flush_{stem}:","\tclr.b gb_force_tick",f"\tmove.w #${target:04X},gb_pc","\tjsr gb_tick","\ttst.b gb_halted",f"\tbeq.s .chain_awake_{stem}","\tjmp gb_dispatch",f".chain_awake_{stem}:",f"\tcmpi.w #${bank:04X},gb_bank",f"\tbeq.s .chain_bank_ok_{stem}","\tjmp gb_dispatch_tree",f".chain_bank_ok_{stem}:",f"\tcmpi.w #${target:04X},gb_pc",f"\tbeq.s .chain_pc_ok_{stem}","\tjmp gb_dispatch_tree",f".chain_pc_ok_{stem}:",f"\tjmp {label(block_by_key[(bank,target)])}",""]
+        cost=constant_costs.get((bank,target))
+        if cost is not None:
+            add=f"addq.w #{cost},d7" if cost<=8 else f"addi.w #{cost},d7"
+            lines += [f"gb_chain_{stem}:","\ttst.b gb_force_tick",f"\tbne.s .chain_flush_{stem}",
+                      "\ttst.b gb_ei_delay",f"\tbne.s .chain_flush_{stem}",
+                      f"\tcmpi.w #{SCHEDULER_BATCH_T_CYCLES-cost},d7",f"\tbhs.s .chain_flush_{stem}",
+                      "\t"+add,f"\tjmp {label(block_by_key[(bank,target)])}",
+                      f".chain_flush_{stem}:",f"\tmove.b #{cost},gb_step_cycles","\tclr.b gb_force_tick",f"\tmove.w #${target:04X},gb_pc","\tjsr gb_tick","\ttst.b gb_halted",f"\tbeq.s .chain_awake_{stem}","\tjmp gb_dispatch",f".chain_awake_{stem}:",f"\tcmpi.w #${bank:04X},gb_bank",f"\tbeq.s .chain_bank_ok_{stem}","\tjmp gb_dispatch_tree",f".chain_bank_ok_{stem}:",f"\tcmpi.w #${target:04X},gb_pc",f"\tbeq.s .chain_pc_ok_{stem}","\tjmp gb_dispatch_tree",f".chain_pc_ok_{stem}:",f"\tjmp {label(block_by_key[(bank,target)])}",""]
+        else:
+            lines += [f"gb_chain_{stem}:","\ttst.b gb_force_tick",f"\tbne.s .chain_flush_{stem}","\ttst.b gb_ei_delay",f"\tbne.s .chain_flush_{stem}","\tmoveq #0,d0","\tmove.b gb_step_cycles,d0","\tmoveq #0,d1","\tmove.w d7,d1","\tadd.w d0,d1",f"\tcmpi.w #{SCHEDULER_BATCH_T_CYCLES},d1",f"\tbhs.s .chain_flush_{stem}","\tmove.w d1,d7",f"\tjmp {label(block_by_key[(bank,target)])}",f".chain_flush_{stem}:","\tclr.b gb_force_tick",f"\tmove.w #${target:04X},gb_pc","\tjsr gb_tick","\ttst.b gb_halted",f"\tbeq.s .chain_awake_{stem}","\tjmp gb_dispatch",f".chain_awake_{stem}:",f"\tcmpi.w #${bank:04X},gb_bank",f"\tbeq.s .chain_bank_ok_{stem}","\tjmp gb_dispatch_tree",f".chain_bank_ok_{stem}:",f"\tcmpi.w #${target:04X},gb_pc",f"\tbeq.s .chain_pc_ok_{stem}","\tjmp gb_dispatch_tree",f".chain_pc_ok_{stem}:",f"\tjmp {label(block_by_key[(bank,target)])}",""]
     if compact_targets:
         lines += ["gb_chain_compact:","\ttst.b gb_force_tick","\tbne.s .compact_flush",
                   "\ttst.b gb_ei_delay","\tbne.s .compact_flush","\tmoveq #0,d2",
@@ -1185,6 +1228,9 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
         "compact_chain_targets":len(compact_targets),
         "hot_chain_targets":len(chain_targets)-len(compact_targets),
         "hot_chain_limit":max_hot_chains,
+        "optimize_pure_chains":optimize_pure_chains,
+        "constant_cycle_chain_targets":len(constant_costs),
+        "elided_cycle_stores":elided_cycle_stores,
         "block_catalog_included":include_block_table,
         "block_catalog_bytes":8*(len(blocks)+1) if include_block_table else 8,
         "dispatch_format":"bank_page_table" if use_pages else "balanced_tree",

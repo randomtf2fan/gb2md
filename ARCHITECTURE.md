@@ -638,3 +638,39 @@ new SM83 instructions. Multi-variant instructions crossing WRAM/echo windows
 are rejected. This is finite specialization, not an interpreter or complete
 support for arbitrary self-modifying code. Single observed variants and
 unobserved RAM entry points remain coverage limitations.
+
+## Constant-cycle native chain specialization (2026-11-11)
+
+`emit_native_blocks(..., optimize_pure_chains=True)` first lowers each observed
+instruction variant and collects the statically linked predecessors of each
+chain target. A target qualifies only if it is selected as hot by the existing
+quota and every linked predecessor has the same, fixed instruction cost.
+An explicit register-only opcode classification and rejection of service calls
+exclude memory/I/O access, mapper changes, EI/DI, control flow, HALT and STOP.
+A mixed-cost or unsafe predecessor makes the target use the existing scheduler.
+Cold targets continue using `gb_chain_compact` with the existing cost stores.
+
+For an eligible edge, the source omits its `gb_step_cycles` RAM write. The
+specialized target still checks `gb_force_tick` and `gb_ei_delay`, then compares
+`d7` against `SCHEDULER_BATCH_T_CYCLES - cost`. The fast path adds the immediate
+cost directly to `d7`. On a flush it first restores the exact cost to
+`gb_step_cycles` and runs the original `gb_tick`/IRQ/bank/PC validation tail.
+The existing 200-T-cycle boundary and its unsigned comparison are preserved;
+there is no clock multiplier, larger batch, skipped instruction or interpreter.
+The pending-cost RAM byte is authoritative again before any timing service.
+
+`native-codegen-report.json` records `optimize_pure_chains`,
+`constant_cycle_chain_targets` and `elided_cycle_stores`. Normal builds enable
+the optimization, including builds launched by the unchanged GUI wrapper.
+`build(..., optimize_pure_chains=False)` / `--no-chain-opt` restores the previous
+scheduler for A/B comparisons. Capacity retries retain the selected mode and
+may reduce specialization as their hot-stub quota decreases.
+
+`benchmark_chains.py` creates three original ROMs and measures source T-cycles
+per Genesis frame with the option off/on. It warms each run, checks missing-
+block markers and PC/SP bounds, and keeps fixture, codegen and native logs in
+its output directory. The reported ratios describe these workloads only;
+they are not game FPS or a full-system bottleneck profile. Original native
+regressions compare timer-read results, register/stack state, EI/IRQ/HALT and
+mapper behavior with both modes. Existing timer and integration suites remain
+required before accepting backend changes.
