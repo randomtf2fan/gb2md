@@ -392,9 +392,14 @@ def native_body(block):
     def push_word(value_setup):
         return value_setup + ["move.w gb_sp,d1","subq.w #2,d1","move.w d1,gb_sp","move.l d1,d4","addq.w #1,d1",
                               "move.l d3,d0","lsr.w #8,d0","jsr gb_write8","move.l d4,d1","move.l d3,d0","jsr gb_write8"]
-    def pop_word():
-        return ["moveq #0,d1","move.w gb_sp,d1","jsr gb_read8","moveq #0,d3","move.b d0,d3","moveq #0,d1","move.w gb_sp,d1","addq.w #1,d1",
-                "jsr gb_read8","lsl.w #8,d0","or.w d0,d3","addq.w #2,gb_sp"]
+    def pop_word(prefix=8):
+        # Only peripheral/OAM stack reads need individual bus phases. Keep
+        # ordinary stack storage on the existing inline path.
+        return ["cmpi.w #$FDFF,gb_sp",f"blo.s .pop_fast_{stem}",
+                "cmpi.w #$FF80,gb_sp",f"bhs.s .pop_fast_{stem}",
+                f"moveq #{prefix},d0","jsr gb_pop16_timed",f"bra.s .pop_ready_{stem}",f".pop_fast_{stem}:",
+                "moveq #0,d1","move.w gb_sp,d1","jsr gb_read8","moveq #0,d3","move.b d0,d3","moveq #0,d1","move.w gb_sp,d1","addq.w #1,d1",
+                "jsr gb_read8","lsl.w #8,d0","or.w d0,d3","addq.w #2,gb_sp",f".pop_ready_{stem}:"]
     def load_r_d3(index):
         if index==6:return ["moveq #0,d1","move.w gb_h,d1","jsr gb_read8","moveq #0,d3","move.b d0,d3"]
         return ["moveq #0,d3",f"move.b {REGS[index]},d3"]
@@ -596,7 +601,7 @@ def native_body(block):
     elif fam=="RET_CC":
         cond=(op>>3)&3; bit=7 if cond<2 else 4; branch=("beq.s","bne.s","beq.s","bne.s")[cond]
         body += [f"btst #{bit},gb_f",f"{branch} .rettaken_{stem}",f"move.w #${nextpc:04X},gb_pc","jmp gb_dispatch",f".rettaken_{stem}:",f"move.b #{taken_cost},gb_step_cycles"]
-        body += pop_word()+["move.w d3,gb_pc","cmpi.w #$4000,d3",f"blo.s .retccfixed_{stem}","cmpi.w #$8000,d3",f"bhs.s .retccfixed_{stem}","move.w gb_rom_bank,gb_bank",f"bra.s .retccbank_{stem}",f".retccfixed_{stem}:","clr.w gb_bank",f".retccbank_{stem}:","jmp gb_dispatch"]
+        body += pop_word(12)+["move.w d3,gb_pc","cmpi.w #$4000,d3",f"blo.s .retccfixed_{stem}","cmpi.w #$8000,d3",f"bhs.s .retccfixed_{stem}","move.w gb_rom_bank,gb_bank",f"bra.s .retccbank_{stem}",f".retccfixed_{stem}:","clr.w gb_bank",f".retccbank_{stem}:","jmp gb_dispatch"]
         return body
     elif fam=="PUSH_RR":
         pair=REGS16[(op>>4)&3] if op!=0xF5 else "gb_a"

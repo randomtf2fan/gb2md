@@ -1,5 +1,66 @@
 # GB2MD compatibility status
 
+## Native stack-read timing correction — 2026-11-12
+
+POP and return instructions previously sampled both stack bytes after charging
+their complete source instruction cost. A stack reading DIV could therefore
+observe its increment too early, and a return straddling the end of OAM DMA
+could assemble the wrong destination. `pop_word` now selects a phased read
+helper for the OAM/I/O stack window, including a word beginning at $FDFF.
+Ordinary stack memory retains the prior inline reads with an address guard.
+
+The low byte is sampled at T8 (T12 for taken conditional RET), the high byte
+four T-cycles later; returns retain their final4T at the instruction boundary.
+The helper preserves temporaries and interrupt deferral. POP AF masking and
+RETI enable behavior remain in the native instruction body. The Python CPU
+and timer/DMA/PPU algorithms are unchanged.
+
+Validation:
+
+- Six original native diagnostic programs match Python: low/high DIV reads,
+  RET, RETI, taken and untaken conditional returns; no missing-block marker.
+- Fast public suite: **167 PASS, 15 native methods skipped**.
+- Full native unit regression: **182/182 PASS** in615.145 seconds.
+- Fresh timer/register regression: **14/14 PASS in Python and native**.
+- Fresh 14-ROM timing group: **Python14 PASS; native10 PASS / 4 FAIL**.
+
+| Timing ROMs improved | Before native | After native | Same discovered blocks |
+|---|---|---|---|
+| pop_timing | FAIL signature | PASS | 962 |
+| ret_cc_timing | Missing-block trap | PASS | 8,154 |
+| ret_timing | Missing-block trap | PASS | 8,154 |
+| reti_timing | Missing-block trap | PASS | 8,154 |
+
+The same logical PCs, observed instruction bytes and finite variants were
+compiled before and after for all four cases. These improvements follow the
+stack-read correction; extra trace coverage was not needed. The three return
+traps were a consequence of incorrect execution, so missing-block diagnostics
+must not be interpreted as proof of incomplete tracing alone.
+
+Remaining native failures: `call_cc_timing2`, `call_timing2`, `push_timing`,
+`rst_timing`, all documented failure signatures, with no missing-block trap.
+Their exact causes still require isolation. Stack-write bus phases are a
+promising next investigation; no such fix is included in this milestone.
+
+Initial focused validation had one incorrect text assertion for the unused
+taken branch of an untaken conditional RET. Its expected prefix was corrected
+from8 to12; native behavioral subcases had passed. The production code did
+not change to satisfy that assertion. Final regression supersedes that log.
+
+Host-speed overhead has not been measured: the normal stack path gains an
+address comparison/branch. No new gameplay, rendering or performance result
+is claimed. Existing protected checkpoints and immutable fixtures are intact.
+The GUI uses its sibling compiler without a new setting; restart/recompile.
+Automated BlastEm runs remain isolated from the desktop.
+
+Reproduce with external tools and the immutable fixtures supplied separately:
+
+```sh
+GB2MD_NATIVE_TESTS=1 GB2MD_BLASTEM=/path/to/isolated-blastem-wrapper GB2MD_VASM=/path/to/vasmm68k_mot python3 -m unittest discover -s tests -q
+python3 run_compat_tests.py test_roms/mooneye-test-suite/acceptance/pop_timing.gb --max-steps 300000 --compile-native --native-output compat-builds/local-pop --run-native-blastem --blastem /path/to/isolated-blastem-wrapper --native-frames 900 --native-timeout 45 --json compat-results/local-pop.json
+```
+
+
 ## Cross-window native instruction variants — 2026-11-12
 
 The native emitter previously rejected multi-variant instructions spanning a

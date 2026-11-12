@@ -796,3 +796,31 @@ non-boundary guards and the Python CPU are unchanged. This does not implement
 all instruction bus phases, mixed-length boundary code or arbitrary unseen RAM
 code. Original regressions cover echo wrapping, OAM operands, conditional cost
 emission and unseen-byte traps.
+
+## Timed native stack reads (2026-11-12)
+
+`native_body`'s `pop_word(prefix=8)` is shared by POP, RET and RETI; taken
+conditional RET uses prefix12. Stack words with SP in $FDFF–$FF7F can touch
+OAM or I/O. Their emitted address guard calls `gb_pop16_timed` instead of
+sampling both bytes after the complete instruction cost. The lower byte is
+read at T8 (T12 for taken RET cc), the higher byte four T-cycles later. POP
+has no remaining cycles; returns leave their final4T for normal dispatch.
+
+The helper uses `gb_tick` to advance existing timer, DMA and PPU state,
+defers interrupt arbitration across both reads, preserves the low byte across
+peripheral work, restores the previous deferral state and requests a boundary
+tick. Return code installs the fetched PC before that final arbitration, and
+RETI still enables IME at its existing instruction-end point. SP advances by
+two; POP AF retains its existing lower-flag-bit mask.
+
+Other stack addresses retain the prior inline reads, with an added address
+comparison/branch. Host overhead has not been benchmarked, so this is a timing
+correctness change rather than a speed claim. The Python CPU and timer/DMA/PPU
+algorithms are unchanged. `tests/test_stack_read_timing.py` generates original
+DIV-boundary programs for both bytes and POP/RET/RETI/taken/untaken returns;
+reference cases also cover WRAM and SP wraparound. Actual native observations
+compare their result memory to Python and require zero diagnostic markers.
+
+This does not correct stack-write bus phases or arbitrary instruction fetch
+patterns. The independent timing specification for POP is documented in
+[Mooneye's POP timing test](https://github.com/Gekkio/mooneye-test-suite/blob/main/acceptance/pop_timing.s); no suite source or ROM is copied into these fixtures.

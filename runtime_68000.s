@@ -1028,6 +1028,48 @@ gb_stat_sync:
 	movem.l (sp)+,d0-d3
 	rts
 
+; Read a POP/RET word from the timing-sensitive OAM/I/O stack window.
+; d0.w is cycles through the low-byte read (8, or 12 for taken RET cc).
+; Return d3.w and advance SP; charge the high read four cycles later and
+; leave any final internal RET cycle for the normal instruction boundary.
+gb_pop16_timed:
+	movem.l d1-d2/d4-d6/a0-a1,-(sp)
+	moveq #0,d2
+	move.b gb_step_cycles,d2
+	sub.w d0,d2
+	subq.w #4,d2
+	move.w d2,-(sp)
+	moveq #0,d2
+	move.b gb_defer_irq,d2
+	move.w d2,-(sp)
+	move.b #1,gb_defer_irq
+	move.b d0,gb_step_cycles
+	bsr.w gb_tick
+	clr.b gb_step_cycles
+	move.w gb_sp,d1
+	bsr.w gb_read8
+	moveq #0,d3
+	move.b d0,d3
+	move.l d3,-(sp)
+	move.b #1,gb_defer_irq
+	move.b #4,gb_step_cycles
+	bsr.w gb_tick
+	clr.b gb_step_cycles
+	move.w gb_sp,d1
+	addq.w #1,d1
+	bsr.w gb_read8
+	lsl.w #8,d0
+	move.l (sp)+,d3
+	or.w d0,d3
+	addq.w #2,gb_sp
+	move.w (sp)+,d2
+	move.b d2,gb_defer_irq
+	move.w (sp)+,d2
+	move.b d2,gb_step_cycles
+	movem.l (sp)+,d1-d2/d4-d6/a0-a1
+	move.b #1,gb_force_tick
+	rts
+
 ; Fetch one byte for an already compiled, uniform-opcode variant guard.
 ; d1.w is the logical address. Preserve temporaries, charge one M-cycle,
 ; defer arbitration through the instruction, and return the bus byte in d0.
