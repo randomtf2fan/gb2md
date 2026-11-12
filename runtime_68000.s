@@ -52,6 +52,7 @@ gb_stat_line equ $FF0055
 gb_window_full equ $FF0056
 gb_bank_dirty equ $FF0057
 gb_irq_entry equ $FF0058
+gb_fetch_bytes equ $FF0059       ; three sampled bytes for native variant guards
 gb_io equ $FF0100
 gb_hram equ $FF0180
 gb_oam equ $FF0200
@@ -1025,6 +1026,26 @@ gb_stat_sync:
 .stat_line_ready:
 	move.b d3,gb_stat_line
 	movem.l (sp)+,d0-d3
+	rts
+
+; Fetch one byte for an already compiled, uniform-opcode variant guard.
+; d1.w is the logical address. Preserve temporaries, charge one M-cycle,
+; defer arbitration through the instruction, and return the bus byte in d0.
+gb_fetch_read8:
+	movem.l d1-d6/a0-a1,-(sp)
+	moveq #0,d0
+	move.b gb_defer_irq,d0
+	move.w d0,-(sp)
+	move.b #1,gb_defer_irq
+	move.b #4,gb_step_cycles
+	bsr.w gb_tick
+	clr.b gb_step_cycles
+	move.l 2(sp),d1
+	bsr.w gb_read8
+	move.w (sp)+,d1
+	move.b d1,gb_defer_irq
+	movem.l (sp)+,d1-d6/a0-a1
+	move.b #1,gb_force_tick
 	rts
 
 gb_tick:

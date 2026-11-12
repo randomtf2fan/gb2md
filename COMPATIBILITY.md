@@ -1,5 +1,66 @@
 # GB2MD compatibility status
 
+## Cross-window native instruction variants — 2026-11-12
+
+The native emitter previously rejected multi-variant instructions spanning a
+WRAM/echo boundary. Uniform-opcode/length variants now fetch each byte through
+the logical memory map, advancing four source cycles per fetch. This handles
+echo wrapping and DMA-dependent OAM operand bytes without interpreting new
+instructions. Unknown sequences still trap; mixed opcode/length boundary
+variants still fail explicitly. Only remaining instruction cycles are charged
+after fetch, including on conditional taken paths.
+
+Validation:
+
+- Original echo/OAM boundary programs and an unseen-variant trap pass natively.
+- Public fast suite: 166 PASS, 14 opt-in native methods skipped.
+- Full native-enabled unit regression: **180/180 PASS** in 553.522 seconds.
+- The previously reported 14 Python instruction-timing failures are stale:
+  all 14 pass freshly on the current reference core. Native results follow.
+
+| Mooneye timing ROM | Python | Native | Failure category |
+|---|---|---|---|
+| add_sp_e_timing | PASS | PASS | — |
+| call_cc_timing | PASS | PASS | — |
+| call_cc_timing2 | PASS | FAIL | protocol |
+| call_timing | PASS | PASS | — |
+| call_timing2 | PASS | FAIL | protocol |
+| jp_cc_timing | PASS | PASS | — |
+| jp_timing | PASS | PASS | — |
+| ld_hl_sp_e_timing | PASS | PASS | — |
+| pop_timing | PASS | FAIL | protocol |
+| push_timing | PASS | FAIL | protocol |
+| ret_cc_timing | PASS | FAIL | missing_native_block |
+| ret_timing | PASS | FAIL | missing_native_block |
+| reti_timing | PASS | FAIL | missing_native_block |
+| rst_timing | PASS | FAIL | protocol |
+
+Native total: **6 PASS, 8 FAIL**, no timeouts or unsupported cases in this
+selection. `add_sp_e_timing` and `call_timing` changed from cross-window
+compilation failures to verified native passes. Missing-block traps in return
+tests are observations; incorrect return values may be their cause rather
+than insufficient coverage. Other failure roots are not yet established.
+
+An original POP diagnostic isolates a further divergence without missing
+blocks: reference stores DIV/TIMA bytes `[0, 0]`, native `[1, 0]`. The native
+`pop_word` samples both bytes after charging the whole instruction; its first
+DIV read therefore occurs too late. This milestone does not fix POP/RET stack
+bus phases. The next task is a general timed stack-read implementation with
+original regression fixtures, followed by affected timer/IRQ reruns.
+
+No fresh commercial-game gameplay or speed measurement was made. Protected
+checkpoints are unchanged. Prior timer and Blargg CPU results are historical;
+they were not all rerun in this phase. The GUI uses its sibling compiler;
+restart it and rebuild to use the new code. All automated native runs used an
+isolated Xvfb display, with no fallback to the desktop.
+
+Reproduce a boundary case using supplied immutable fixtures and external tools:
+
+```sh
+python3 run_compat_tests.py test_roms/mooneye-test-suite/acceptance/add_sp_e_timing.gb --max-steps 300000 --compile-native --native-output compat-builds/local-boundary --run-native-blastem --blastem /path/to/isolated-blastem-wrapper --native-frames 1800 --native-timeout 60 --json compat-results/local-boundary.json
+```
+
+
 ## Interrupt-entry correction and extended native CPU validation — 2026-11-11
 
 The interrupt stack push selected and acknowledged a request too early in the

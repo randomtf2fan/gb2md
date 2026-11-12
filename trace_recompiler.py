@@ -388,7 +388,7 @@ def native_body(block):
     nextpc=(pc+len(bytes.fromhex(block["bytes"])))&0xFFFF; fam=block["family"]
     body=[]
     stem=f"B{bank:03X}_{pc:04X}{block.get('variant_suffix','')}"
-    taken_cost=instruction_cycles(op,operand,True)
+    taken_cost=instruction_cycles(op,operand,True)-block.get('bus_fetch_cycles',0)
     def push_word(value_setup):
         return value_setup + ["move.w gb_sp,d1","subq.w #2,d1","move.w d1,gb_sp","move.l d1,d4","addq.w #1,d1",
                               "move.l d3,d0","lsr.w #8,d0","jsr gb_write8","move.l d4,d1","move.l d3,d0","jsr gb_write8"]
@@ -1025,11 +1025,22 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
 def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,include_block_table=True,optimize_pure_chains=True):
     """Emit validated block metadata without repeating reference discovery."""
     if max_hot_chains is not None and max_hot_chains<0:raise ValueError('negative hot chain limit')
+    blocks=[dict(block) for block in blocks]
+    for block in blocks:
+        pc=block['pc'];raws=[bytes.fromhex(x) for x in (block['bytes'],*block.get('observed_variants',[]))]
+        end=0xE000 if 0xC000<=pc<0xE000 else 0xFE00
+        if len(raws)>1 and 0xC000<=pc<0xFE00 and any(pc+len(raw)>end for raw in raws):
+            # Keep mixed-opcode/length discovery conservative. Uniform native
+            # variants can fetch their bytes across logical memory windows.
+            if len({(raw[0],len(raw)) for raw in raws})!=1:
+                raise RuntimeError(f'dynamic code variant crosses WRAM window at ${pc:04X} with differing opcode/length')
+            block['bus_fetch_cycles']=len(raws[0])*4
     used=sorted({b["family"] for b in blocks if not b["native_lowered"]})
     label=lambda b:f"L_gb_B{b['bank']:03X}_{b['pc']:04X}"
     block_by_key={(b["bank"],b["pc"]):b for b in blocks}
     chain_targets=set();incoming_costs=collections.defaultdict(set);source_edges=collections.defaultdict(set)
     def pure_cycles(block,body):
+        if block.get('bus_fetch_cycles'):return None
         op=block["opcode"]
         register_only=(op in (0,0x01,0x11,0x21,0x31,0x03,0x13,0x23,0x33,0x0B,0x1B,0x2B,0x3B,0x07,0x0F,0x17,0x1F,0x27,0x2F,0x37,0x3F,0xE8,0xF8,0xF9)
                        or op<0x40 and op&7 in (4,5,6) and (op>>3)&7!=6
@@ -1096,7 +1107,12 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
             variants.append({**block,"opcode":raw[0],"operand":operand,"bytes":raw_hex,"family":family(raw[0]),"observed_variants":[]})
         if len(variants)>1:
             pc=block["pc"];resolver=f"{block['bank']:03X}_{pc:04X}"
-            if 0xFE00<=pc<0xFEA0:
+            if block.get('bus_fetch_cycles'):
+                for offset in range(block['bus_fetch_cycles']//4):
+                    lines += [f"\tmove.w #${pc+offset:04X},d1","\tjsr gb_fetch_read8",f"\tmove.b d0,gb_fetch_bytes+{offset}"]
+                lines += ["\tlea gb_fetch_bytes,a0"]
+                base=0
+            elif 0xFE00<=pc<0xFEA0:
                 ff_index=next((index for index,item in enumerate(variants) if item["bytes"]=="ff"),None)
                 lines += ["\ttst.b gb_dma_active",f"\tbeq.s .dynamic_accessible_{resolver}"]
                 lines += [f"\tbra.w .dynamic_variant_{resolver}_{ff_index}" if ff_index is not None else f"\tbra.w .dynamic_missing_{resolver}",f".dynamic_accessible_{resolver}:","\tlea gb_oam,a0"]
@@ -1127,9 +1143,10 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
                 lines.append(f".dynamic_variant_{block['bank']:03X}_{block['pc']:04X}_{index}:")
             identity=(variant['bank'],variant['pc'],variant['bytes'])
             edges=source_edges.get(identity,set())
-            elide=bool(edges) and all(target in constant_costs for target in edges)
+            elide=not variant.get('bus_fetch_cycles') and bool(edges) and all(target in constant_costs for target in edges)
             if not elide:
-                lines.append(f"\tmove.b #{instruction_cycles(variant['opcode'],variant['operand'],False)},gb_step_cycles")
+                cost=instruction_cycles(variant['opcode'],variant['operand'],False)-variant.get('bus_fetch_cycles',0)
+                lines.append(f"\tmove.b #{cost},gb_step_cycles")
             else:elided_cycle_stores+=1
             direct=threaded_bodies.get(identity)
             if direct is not None: lines += [f"\t{x}" for x in direct]+[""]

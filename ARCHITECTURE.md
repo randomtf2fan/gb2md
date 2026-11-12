@@ -634,8 +634,9 @@ The same pass extends `emit_native_blocks()`'s finite byte-variant resolver
 to WRAM and echo RAM, using their shared `gb_wram` storage and distinct logical
 PCs. Each observed sequence is translated to a separate native body; runtime
 byte comparisons select that body. Unknown sequences trap instead of decoding
-new SM83 instructions. Multi-variant instructions crossing WRAM/echo windows
-are rejected. This is finite specialization, not an interpreter or complete
+new SM83 instructions. Uniform-opcode/length variants crossing a WRAM/echo
+window now use sampled bus fetches (see below); mixed opcode/length boundary
+variants are still rejected. This is finite specialization, not an interpreter or complete
 support for arbitrary self-modifying code. Single observed variants and
 unobserved RAM entry points remain coverage limitations.
 
@@ -770,3 +771,28 @@ at startup. Its RAM fields occupy `$FF0060..$FF0073`, outside GB-visible state
 and serial-test buffers. It is off by default and exposed by the GUI checkbox.
 Disabled-mode binary parity is checked against a prior verified fixture;
 forced PAL/NTSC and trapped-source tests validate enabled-mode timing.
+
+## Native variant fetches across memory windows (2026-11-12)
+
+An instruction can start in WRAM or its echo and fetch an operand from the
+next logical region. The previous variant guard compared bytes through one
+backing-array pointer, so it rejected such instructions to avoid reading past
+that array. `emit_native_blocks` now permits boundary variants sharing the
+same opcode and length. Other cross-window patterns still fail explicitly.
+
+For these guards only, `gb_fetch_read8` advances one four-T-cycle bus fetch
+and uses `gb_read8` for each logical address. Thus echo wrapping and OAM DMA
+accessibility are checked at each fetch, including when DMA finishes between
+operand bytes. Three sampled bytes at `gb_fetch_bytes` ($FF0059–$FF005B) select
+only previously translated native bodies. An unseen sequence still traps.
+No new source opcode is interpreted or compiled at runtime.
+
+The emitter marks these copies with `bus_fetch_cycles`; their native body
+charges only the remaining instruction cycles. Taken conditional costs also
+subtract the fetched prefix, and these edges are excluded from constant-cost
+specialization. `gb_force_tick` ensures end-of-instruction arbitration; fetch
+phases defer interrupts and preserve the previous deferral state. Existing
+non-boundary guards and the Python CPU are unchanged. This does not implement
+all instruction bus phases, mixed-length boundary code or arbitrary unseen RAM
+code. Original regressions cover echo wrapping, OAM operands, conditional cost
+emission and unseen-byte traps.
