@@ -824,3 +824,40 @@ compare their result memory to Python and require zero diagnostic markers.
 This does not correct stack-write bus phases or arbitrary instruction fetch
 patterns. The independent timing specification for POP is documented in
 [Mooneye's POP timing test](https://github.com/Gekkio/mooneye-test-suite/blob/main/acceptance/pop_timing.s); no suite source or ROM is copied into these fixtures.
+
+## Timed native stack writes (2026-11-12)
+
+`native_body`'s `push_word` serves PUSH, PUSH AF, CALL, conditional CALL and
+RST. It computes the low destination `(SP-2)&$FFFF` before selecting a path.
+Words touching OAM/I/O (low destination $FDFF–$FF7F) or IE ($FFFE/$FFFF)
+use `gb_push16_timed`. Other words retain the original inline stores, with
+an added comparison/branch; host-speed overhead has not been measured.
+
+The helper charges the remaining instruction cost minus4T, decrements SP and
+writes the upper byte, then advances4T, decrements SP and writes the lower
+byte. Already sampled cross-window fetch costs are therefore not charged
+twice. The complete payload stays on the native host stack: OAM/I/O handlers
+may call `gb_tick` and clobber native d3/d4. The previous inline path kept a
+low address in d4 across that call and could lose the second store.
+
+`gb_bus_write_charged` ($FF005C) marks each precharged write. OAM/timer/IF/IE
+barriers skip a redundant scheduler call for this marker or the existing
+interrupt-entry marker. A zero-cycle retick could clear the TIMA reload-cycle
+flag and wrongly accept a write that should be ignored. An original reload-
+edge diagnostic reproduces reference$FF versus native$A6 without this gate.
+The marker is cleared after each write and checked by native regressions.
+
+IRQ arbitration remains deferred through both bytes; the prior deferral state
+is restored and the completed instruction requests a normal boundary tick.
+CALL/RST code installs its target PC before arbitration. The helper preserves
+native temporaries, clears the charged instruction cost and uses the existing
+mapper, timer, DMA and I/O handlers. Their algorithms and the reference CPU
+are unchanged. The interrupt-entry push retains its separate existing path.
+
+Original diagnostics in `tests/test_stack_write_timing.py` make a high-byte
+DIV reset observable four cycles before the lower write, and check OAM/echo
+boundaries, AF data, taken/untaken calls and IE wraparound. ROM code is generated
+from original source. These changes do not establish full CPU bus/DMA
+restrictions or general PPU accuracy. Independent timing references are
+[Mooneye PUSH](https://github.com/Gekkio/mooneye-test-suite/blob/main/acceptance/push_timing.s)
+and [CALL](https://github.com/Gekkio/mooneye-test-suite/blob/main/acceptance/call_timing2.s).

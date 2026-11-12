@@ -390,8 +390,13 @@ def native_body(block):
     stem=f"B{bank:03X}_{pc:04X}{block.get('variant_suffix','')}"
     taken_cost=instruction_cycles(op,operand,True)-block.get('bus_fetch_cycles',0)
     def push_word(value_setup):
-        return value_setup + ["move.w gb_sp,d1","subq.w #2,d1","move.w d1,gb_sp","move.l d1,d4","addq.w #1,d1",
-                              "move.l d3,d0","lsr.w #8,d0","jsr gb_write8","move.l d4,d1","move.l d3,d0","jsr gb_write8"]
+        return value_setup + ["move.w gb_sp,d1","subq.w #2,d1",
+                              "cmpi.w #$FDFF,d1",f"blo.s .push_fast_{stem}",
+                              "cmpi.w #$FF80,d1",f"blo.s .push_timed_{stem}",
+                              "cmpi.w #$FFFE,d1",f"blo.s .push_fast_{stem}",
+                              f".push_timed_{stem}:","jsr gb_push16_timed",f"bra.s .push_ready_{stem}",
+                              f".push_fast_{stem}:","move.w d1,gb_sp","move.l d1,d4","addq.w #1,d1",
+                              "move.l d3,d0","lsr.w #8,d0","jsr gb_write8","move.l d4,d1","move.l d3,d0","jsr gb_write8",f".push_ready_{stem}:"]
     def pop_word(prefix=8):
         # Only peripheral/OAM stack reads need individual bus phases. Keep
         # ordinary stack storage on the existing inline path.

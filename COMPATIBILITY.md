@@ -1,5 +1,79 @@
 # GB2MD compatibility status
 
+## Phased native stack writes — 2026-11-12
+
+The shared PUSH/CALL/RST lowering previously collapsed two stack writes into
+one scheduler boundary. A high-byte DIV reset happened four source cycles
+too late. An OAM write could also clobber the native d4 temporary holding the
+second address, losing the low-byte store. Original diagnostics reproduced
+both problems without missing blocks: DIV reference1/native0, and an OAM/echo
+word reference$6B27/native$6B00.
+
+The new `gb_push16_timed` path advances through the high write, then4T through
+the low write, preserving its payload on the native stack. It handles words
+touching OAM/I/O or IE wraparound. Other stack words keep their original inline
+stores with an address guard. Sampled instruction-fetch prefixes are deducted
+before this helper, and IRQ service waits for the instruction boundary.
+
+During validation a draft helper still failed a TIMA reload edge: reference
+`$FF`, native `$A6`. Existing handlers repeated a zero-cycle scheduler sync
+after the phase was already charged, clearing the reload-cycle flag. The
+`gb_bus_write_charged` marker now bypasses redundant OAM/timer/IF/IE syncs;
+the existing interrupt-entry marker does so as well. The marker is cleared
+after each helper write. This preserves the current peripheral model rather
+than replacing its timer or DMA algorithms.
+
+Validation:
+
+- Nine original native diagnostic scenarios PASS, including the reload edge,
+  AF data, taken/untaken calls, IE wrapping and an OAM/echo word.
+- Fast public suite: **168 PASS, 16 native methods skipped**.
+- Full native unit regression: **184/184 PASS** in706.180 seconds.
+- Fresh timer/register regression: **14/14 PASS in Python and native**.
+- Fresh interrupt/EI controls: **5/5 PASS in Python and native** (`ei_sequence`,
+  `ei_timing`, `halt_ime0_ei`, `interrupts/ie_push`, `rapid_di_ei`).
+
+| Selected Mooneye instruction timing | Python | Native |
+|---|---|---|
+| add_sp_e_timing | PASS | PASS |
+| call_cc_timing | PASS | PASS |
+| call_cc_timing2 | PASS | PASS |
+| call_timing | PASS | PASS |
+| call_timing2 | PASS | PASS |
+| jp_cc_timing | PASS | PASS |
+| jp_timing | PASS | PASS |
+| ld_hl_sp_e_timing | PASS | PASS |
+| pop_timing | PASS | PASS |
+| push_timing | PASS | PASS |
+| ret_cc_timing | PASS | PASS |
+| ret_timing | PASS | PASS |
+| reti_timing | PASS | PASS |
+| rst_timing | PASS | PASS |
+
+**14/14 PASS in both Python and native execution** for this selection, up
+from10 native passes at the preceding milestone. No source trace expansion
+was required: CALL2/CALLcc2 retain697 blocks each, PUSH686, RST679, with exactly
+the same PCs, byte sequences and finite variants as before. The first full
+unit run was intentionally stopped to add the reload-edge regression; only
+the final completed rerun should be used as verification.
+
+These results do not establish full instruction/bus timing, full Mooneye
+compatibility, PPU correctness or broader cartridge support. Source CPU,
+controller exploration and GUI logic are unchanged. No commercial gameplay
+or host-speed measurement was made; normal stack paths gain an address guard.
+Protected checkpoint hashes and immutable fixtures are unchanged. All native
+tests used the isolated virtual display, with no desktop fallback.
+
+Reproduce with external tools and supplied immutable fixtures:
+
+```sh
+GB2MD_NATIVE_TESTS=1 GB2MD_BLASTEM=/path/to/isolated-blastem-wrapper GB2MD_VASM=/path/to/vasmm68k_mot python3 -m unittest discover -s tests -q
+python3 run_compat_tests.py test_roms/mooneye-test-suite/acceptance/push_timing.gb --max-steps 300000 --compile-native --native-output compat-builds/local-push --run-native-blastem --blastem /path/to/isolated-blastem-wrapper --native-frames 900 --native-timeout 45 --json compat-results/local-push.json
+```
+
+Older sections below describe their respective source revisions.
+
+
 ## Native stack-read timing correction — 2026-11-12
 
 POP and return instructions previously sampled both stack bytes after charging

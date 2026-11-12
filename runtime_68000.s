@@ -53,6 +53,7 @@ gb_window_full equ $FF0056
 gb_bank_dirty equ $FF0057
 gb_irq_entry equ $FF0058
 gb_fetch_bytes equ $FF0059       ; three sampled bytes for native variant guards
+gb_bus_write_charged equ $FF005C ; stack bus phase already advanced by sequencer
 gb_io equ $FF0100
 gb_hram equ $FF0180
 gb_oam equ $FF0200
@@ -457,6 +458,10 @@ gb_write8:
 .oam:
 	; As with reads, an OAM write is ordered at its actual instruction boundary
 	; so a DMA that starts during the instruction can suppress the store.
+	tst.b gb_bus_write_charged
+	bne.s .oam_phase_ready
+	tst.b gb_irq_entry
+	bne.s .oam_phase_ready
 	movem.l d0-d2/a0,-(sp)
 	move.b #1,gb_defer_irq
 	bsr.w gb_tick
@@ -464,6 +469,7 @@ gb_write8:
 	move.b #1,gb_force_tick
 	clr.b gb_step_cycles
 	movem.l (sp)+,d0-d2/a0
+.oam_phase_ready:
 	tst.b gb_dma_active
 	bne.s .oam_unchanged
 	subi.w #$FE00,d1
@@ -486,6 +492,10 @@ gb_write8:
 	cmpi.w #$0007,d1
 	bhi.s .io_timing_synced
 .io_flush_timing:
+	tst.b gb_bus_write_charged
+	bne.s .io_timing_synced
+	tst.b gb_irq_entry
+	bne.s .io_timing_synced
 	; Preserve the write value/address while committing all cycles that
 	; precede this timing-sensitive access. Clearing gb_step_cycles prevents
 	; the chain stub from charging this instruction a second time.
@@ -667,8 +677,11 @@ gb_write8:
 ; scheduler batch. Commit prior cycles before the write, defer service until
 ; the opcode completes, and preserve temporaries used by word/stack stores.
 gb_irq_write_barrier:
+	tst.b gb_bus_write_charged
+	bne.s .charged_write
 	tst.b gb_irq_entry
 	beq.s .normal_write
+.charged_write:
 	; The interrupt-entry sequencer already charged this bus phase.
 	move.b #1,gb_force_tick
 	rts
@@ -1026,6 +1039,50 @@ gb_stat_sync:
 .stat_line_ready:
 	move.b d3,gb_stat_line
 	movem.l (sp)+,d0-d3
+	rts
+
+; Write d3.w for PUSH/CALL/RST to an OAM/I/O/IE stack window. gb_step_cycles
+; is the remaining instruction cost (any sampled fetch prefix is excluded).
+; Charge through the upper write, then one M-cycle through the lower write.
+; Keep the payload on the host stack: I/O and OAM barriers may clobber d3/d4.
+gb_push16_timed:
+	movem.l d0-d6/a0-a1,-(sp)
+	move.w d3,-(sp)
+	moveq #0,d0
+	move.b gb_defer_irq,d0
+	move.w d0,-(sp)
+	moveq #0,d0
+	move.b gb_step_cycles,d0
+	subq.w #4,d0
+	move.b #1,gb_defer_irq
+	move.b d0,gb_step_cycles
+	bsr.w gb_tick
+	clr.b gb_step_cycles
+	move.w gb_sp,d1
+	subq.w #1,d1
+	move.w d1,gb_sp
+	move.w 2(sp),d0
+	lsr.w #8,d0
+	move.b #1,gb_bus_write_charged
+	bsr.w gb_write8
+	clr.b gb_bus_write_charged
+	move.b #1,gb_defer_irq
+	move.b #4,gb_step_cycles
+	bsr.w gb_tick
+	clr.b gb_step_cycles
+	move.w gb_sp,d1
+	subq.w #1,d1
+	move.w d1,gb_sp
+	move.w 2(sp),d0
+	move.b #1,gb_bus_write_charged
+	bsr.w gb_write8
+	clr.b gb_bus_write_charged
+	move.w (sp)+,d0
+	move.b d0,gb_defer_irq
+	addq.l #2,sp
+	movem.l (sp)+,d0-d6/a0-a1
+	clr.b gb_step_cycles
+	move.b #1,gb_force_tick
 	rts
 
 ; Read a POP/RET word from the timing-sensitive OAM/I/O stack window.
