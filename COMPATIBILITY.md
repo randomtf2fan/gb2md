@@ -1,5 +1,54 @@
 # GB2MD compatibility status
 
+## Bounded interrupt/HALT and memory survey — 2026-11-13
+
+No compiler, runtime, GUI or fixture changes in this survey; tested implementation
+is commit `2d6e78a`. Fresh fast suite: **168 PASS, 16 native methods skipped**
+(184 discovered, 8.139 seconds). The preceding full184 native-enabled result
+remains historical; that entire native unit suite was not rerun here.
+
+| ROM | Python | Native | Detail |
+|---|---|---|---|
+| if_ie_registers.gb | PASS | PASS | Observed terminal signature |
+| di_timing-GS.gb | PASS | FAIL | Missing native block at bank $0000 PC $01EE |
+| intr_timing.gb | PASS | PASS | Observed terminal signature |
+| reti_intr_timing.gb | PASS | PASS | Observed terminal signature |
+| halt_ime0_nointr_timing.gb | PASS | PASS | Observed terminal signature |
+| halt_ime1_timing.gb | PASS | PASS | Observed terminal signature |
+| halt_ime1_timing2-GS.gb | PASS | FAIL | Missing native block at bank $0000 PC $028F |
+| 01-read_timing.gb | PASS | PASS | Native diagnostic serial Passed |
+| 02-write_timing.gb | PASS | PASS | Native diagnostic serial Passed |
+| 03-modify_timing.gb | PASS | FAIL | Missing native block at bank $0000 PC $C3E9 |
+
+Survey total: **Python10 PASS; native7 PASS / 3 FAIL**, no timeout or
+unsupported results. Native successes were observed independently through
+Fibonacci terminal registers or the explicitly instrumented serial buffer.
+Blargg memory read/write timing pass; modify timing remains unresolved.
+
+All three traps request entries absent from the generated profile. This is an
+observation, not proof that longer tracing is the solution: wrong execution
+can reach a failure path or generate a different RAM-code sequence. Root
+causes remain unestablished. Next work should reproduce the first divergence
+for `di_timing-GS`, then investigate HALT timing and the memory-modify case.
+The DI lowering clears IME before its own dispatch, while straight-line native
+scheduling batches cycles; interrupt ordering around that boundary is a
+candidate for investigation, not a verified diagnosis. Mooneye documents the
+DI test's two alignment cases in its
+[original source](https://github.com/Gekkio/mooneye-test-suite/blob/main/acceptance/di_timing-GS.s).
+
+Reproduce a native case using externally supplied immutable fixtures/tools:
+
+```sh
+python3 run_compat_tests.py test_roms/mooneye-test-suite/acceptance/di_timing-GS.gb --max-steps 300000 --compile-native --native-output compat-builds/local-di --run-native-blastem --blastem /path/to/isolated-blastem-wrapper --native-frames 900 --native-timeout 45 --json compat-results/local-di.json
+```
+
+The native survey used300,000 discovery steps per ROM and900 Genesis frames,
+with one bounded1800-frame retry only if a terminal result was absent. Python
+limits were300,000 for Mooneye and1,500,000 for Blargg. Nothing in this survey
+establishes new gameplay, rendering or performance results. Known checkpoints
+remain unchanged; all automated windows stayed on the isolated display.
+
+
 ## Phased native stack writes — 2026-11-12
 
 The shared PUSH/CALL/RST lowering previously collapsed two stack writes into
