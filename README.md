@@ -155,6 +155,30 @@ plateau termination until their frame is reached. A plateau is reported as a
 heuristic stop, not proof of complete coverage. Exact counts and stop reasons
 are written to `trace-profile.json` and `build-report.json`.
 
+### Reusing coverage between builds (advanced CLI)
+
+`--coverage-profile` merges a previous `trace-profile.json` for the **exact same
+ROM** before static closure. Repeat the option to merge several runs:
+
+```sh
+python3 build_recompiled.py owned-game.gb --out build-next --steps 15000000 \
+  --coverage-profile build-previous/trace-profile.json
+```
+
+New profiles contain a source SHA-256. Imports reject a different cartridge,
+incorrect ROM instruction bytes/banks and malformed entries. Legacy profiles
+without that digest are rejected. RAM-code observations retain native byte
+checks, including traps for unseen modifications. Import trusted local profiles;
+a cartridge digest cannot authenticate user-supplied RAM observations.
+
+This reuses code coverage, not an emulator snapshot or controller playback.
+Current trace steps and fresh dynamic entries are reported separately from
+imported observations and static candidates. Missing paths can still trap, and
+merged code may exceed the Genesis image-size limit. Imports currently require
+the CLI; existing GUI settings and fresh tracing remain unchanged. Profiles
+contain instruction bytes: keep commercial-game profiles private, outside the
+public source tree, along with generated ROMs.
+
 ### Automatic controller exploration
 
 `--auto-inputs` branches from deduplicated emulator snapshots taken before

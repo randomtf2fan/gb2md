@@ -1,5 +1,62 @@
 # GB2MD compatibility status
 
+## Incremental coverage and dialogue investigation — 2026-11-16
+
+The older native Pokémon Red checkpoint reached downstairs but trapped on
+entry to Mother's dialogue routine. A current Python reference continuation
+with real input reproduced the intended indirect jump into code embedded in
+a dialogue stream. Five executed entries were missing from the old profile;
+this observation establishes a coverage gap, rather than a banking fault on
+that path. No dialogue opcode, game address or title check was added to the
+compiler or runtime.
+
+The new optional `--coverage-profile` imports coverage for the exact cartridge,
+then runs normal static closure and native lowering. SHA-256, physical ROM
+bytes/banks, instruction shapes and identities are validated. RAM observations
+keep their native guards; unseen variants still trap. Current tracing and
+imported coverage are reported separately. This is incremental coverage reuse,
+not automatic discovery of every indirect target, state restoration or input
+playback. The GUI's existing fresh-build path remains unchanged; imports are
+currently an advanced CLI option.
+
+A fresh native boot with actual SDL input reached preset naming, bedroom
+movement, the staircase and downstairs. Mother's dialogue appeared, completed
+and closed; another A press reopened the conversation. All 103 sampled
+states through 118,602 Genesis frames had zero missing/unimplemented markers.
+No guest-memory writes were used. Outdoor progression, starters, battles,
+saving, audio and physical hardware remain unverified; graphics and performance
+limitations remain. This establishes a bounded native interaction milestone,
+not full Pokémon playability.
+
+The candidate reused the private prior 35,067-entry profile and five newly
+observed entries. Current closure produced 38,082 entries in a 4,178,174-byte
+image. The ordinary CLI ran **two new trace steps**, not another long sweep;
+reports distinguish those steps from imported historical observations. Only
+about 16 KiB remains below the current 4 MiB image cap. Ordinary short GUI
+tracing is still known to miss initialization paths; this build does not
+establish that default GUI settings automatically produce playable Pokémon.
+
+Validation:
+
+- Fast suite: **182 PASS / 23 native-only skips** (205 methods), private and
+  public checkouts. Native-enabled method results: **205/205 PASS** across
+  103 + 102 batches. One outer batch launcher reported SIGTERM after all
+  passing method records were saved; that shutdown issue remains recorded
+  separately from the successful native assertions.
+- New coverage module: **6/6 PASS**, including actual native ROM-path execution,
+  a known RAM-code variant and an unseen-variant trap. These original test
+  cartridges contain no commercial game data.
+- Three ordinary builds without imports are byte-identical to the previous
+  published compiler. A public/private CLI import build also matched exactly.
+- CPU, memory, lowering, PPU and Genesis runtime sources were unchanged.
+  The previous 43-fixture native protocol result was not rerun in this pass.
+  No new timing, performance, physical-hardware or full-game compatibility
+  claim follows from this milestone.
+
+Commercial ROMs, merged profiles, generated assembly, native images and
+screenshots remain private; only original source, tests and documentation are
+published. Keep old checkpoints and fixture trees unchanged.
+
 ## Native scheduler bookkeeping — 2026-11-15
 
 Native profiling identified repeated STAT and interrupt-deadline bookkeeping

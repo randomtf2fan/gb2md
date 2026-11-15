@@ -1038,3 +1038,32 @@ VBlank-only and mixed interrupts. Supply an earlier `runtime_68000.s` through
 coverage must match. External vasm and BlastEm are required. The JSON records
 runtime hashes and source-cycle progress over fixed Genesis-frame intervals.
 A throughput ratio describes these synthetic loops, not commercial-game FPS.
+
+## Optional coverage imports (2026-11-16)
+
+`compile_trace(..., coverage_profiles=...)` validates imports with
+`coverage_profiles.load_coverage_profiles` before executing a new trace.
+`merge_coverage_profiles` combines instruction identities and observed byte
+variants before ordinary static closure and native lowering. No source CPU,
+peripheral, mapper or Genesis runtime behavior is replaced.
+
+A profile must carry `source_sha256`, matching the entire input cartridge.
+Every imported ROM instruction/variant must match bytes in the stated physical
+bank. Fixed-window identities use bank zero; upper-window bank zero requires
+MBC5. Crossing a ROM window, malformed lengths, duplicate identities and invalid
+RAM locations are rejected. Parsing limits are 16 profiles, 128 MiB per file,
+one million entries and 256 alternate variants per entry. The loader reads JSON data;
+it does not deserialize Python objects or restore emulator state.
+
+RAM instruction bytes are trusted local observations, not proven by the ROM
+digest. Their existing native guard compares live memory before execution;
+an unobserved variant still traps. Unknown fixed-ROM active-bank contexts are
+not invented from imported identities. Importing a profile does not reproduce
+its complete dynamic execution context or prove future coverage.
+
+`total_steps_executed` counts only current tracing. The report separately
+records `fresh_dynamic_unique_block_count` and `coverage_imports` (entries,
+observed entries and newly contributed identities). Imported zero-hit static
+candidates are not reported as dynamic execution. Existing hit weights guide
+layout but do not become hardcoded inputs or runtime decisions. The build API
+and CLI expose the optional feature; the GUI continues to run fresh tracing.

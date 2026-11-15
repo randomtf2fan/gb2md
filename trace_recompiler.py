@@ -14,6 +14,7 @@ from gb2md import instruction_length
 from bank_analysis import fixed_bank_context_targets
 from ram_callback_analysis import RamCallbackAnalyzer
 from serial_test import SerialTestMemory
+from coverage_profiles import load_coverage_profiles, merge_coverage_profiles
 
 REGS=("gb_b","gb_c","gb_d","gb_e","gb_h","gb_l",None,"gb_a")
 REGS16=("gb_b","gb_d","gb_h","gb_sp")
@@ -642,7 +643,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
                   input_max_branches=128,input_max_depth=4,input_branch_steps=150_000,
                   input_max_steps=20_000_000,input_hold_frames=4,
                   input_snapshot_interval_frames=4,input_max_snapshots=1024,
-                  input_bridge_states_per_depth=8,input_sweep_steps=0,test_serial=False):
+                  input_bridge_states_per_depth=8,input_sweep_steps=0,test_serial=False,coverage_profiles=()):
     if steps<=0:raise ValueError("steps must be positive")
     if auto_steps and (auto_max_steps<steps or (auto_chunk_steps is not None and auto_chunk_steps<=0) or auto_plateau_chunks<=0 or auto_min_new_blocks<=0):
         raise ValueError("invalid auto-step safety limits")
@@ -651,6 +652,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
     if input_sweep_steps<0 or (input_sweep_steps and not auto_inputs):
         raise ValueError('input sweep requires --auto-inputs and a nonnegative budget')
     rom=rom_path.read_bytes();hits=collections.Counter();first={};observed=collections.defaultdict(collections.Counter);scenario_reports=[];dynamic_values=collections.defaultdict(set)
+    imported_profiles=load_coverage_profiles(rom,coverage_profiles)
     observed_banks=collections.defaultdict(set)
     input_candidates=[];candidate_keys=set();candidate_last_frame={};sweep_start=None
     def capture_input_state(cpu,memory,origin,target,depth=0,limit=None,interval=None):
@@ -774,7 +776,9 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
         elif not roots:exploration_report["stop_reason"]="no JOYP read snapshots discovered"
         else:exploration_report["stop_reason"]="exploration queue exhausted"
         scenario_reports.append({"name":"automatic-input-exploration","blocks":len(exploration_keys),"steps_executed":exploration_report["steps_executed"],"coverage_growth":[exploration_report["new_blocks"]],"stop_reason":exploration_report["stop_reason"],"end_pc":None,"end_frame":None})
-    dynamic_unique_block_count=len(first)
+    fresh_dynamic_unique_block_count=len(first)
+    coverage_imports=merge_coverage_profiles(imported_profiles,first,hits,observed,observed_banks,dynamic_values)
+    dynamic_unique_block_count=sum(hits[key]>0 for key in first)
     # Close direct ROM control flow from every dynamically observed entry.
     # Trace discovery identifies the active banks and dynamic targets; this
     # pass then compiles both outcomes of conditionals so collision failures,
@@ -1037,7 +1041,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
                 block["idle_wait"]=True
     for block in blocks:block["native_lowered"]=native_body(block) is not None
     out.mkdir(parents=True,exist_ok=True)
-    (out/"trace-profile.json").write_text(json.dumps({"input":str(rom_path),"steps_per_scenario":steps,"auto_steps":auto_steps,"auto_inputs":auto_inputs,"test_serial":test_serial,"total_steps_executed":sum(s["steps_executed"] for s in scenario_reports),"dynamic_unique_blocks":dynamic_unique_block_count,"indirect_table_targets":len(indirect_table_targets),"hl_pointer_table_targets":len(hl_table_targets),"bitmask_dispatch_targets":len(bitmask_targets),"rst_inline_table_targets":len(rst_table_targets),"banked_thunk_targets":len(banked_thunk_targets),"constant_bank_call_targets":len(constant_bank_targets),"constant_far_call_targets":len(far_call_targets),"constant_far_call_returns":len(far_call_returns),"banked_pointer_table_targets":len(far_table_targets),"banked_pointer_tables":far_table_reports,"bank_context_targets":len(bank_context_targets),"indexed_call_targets":len(indexed_call_targets),"indexed_call_returns":len(indexed_call_returns),"indexed_call_tables":indexed_call_reports,"ram_callback_targets":len(ram_callback_targets),"ram_callback_returns":len(ram_callback_returns),"ram_callback_records":ram_callback_report.get("records",[]),"ram_callback_analysis_limits":{"pair_limit_reached":ram_callback_report.get("pair_limit_reached",False),"exhausted_contexts":ram_callback_report.get("exhausted_contexts",[])},"total_blocks_after_static_closure":len(blocks),"input_exploration":exploration_report,"scenarios":scenario_reports,"blocks":blocks},indent=2)+"\n")
+    (out/"trace-profile.json").write_text(json.dumps({"input":str(rom_path),"source_sha256":hashlib.sha256(rom).hexdigest(),"coverage_imports":coverage_imports,"fresh_dynamic_unique_block_count":fresh_dynamic_unique_block_count,"steps_per_scenario":steps,"auto_steps":auto_steps,"auto_inputs":auto_inputs,"test_serial":test_serial,"total_steps_executed":sum(s["steps_executed"] for s in scenario_reports),"dynamic_unique_blocks":dynamic_unique_block_count,"indirect_table_targets":len(indirect_table_targets),"hl_pointer_table_targets":len(hl_table_targets),"bitmask_dispatch_targets":len(bitmask_targets),"rst_inline_table_targets":len(rst_table_targets),"banked_thunk_targets":len(banked_thunk_targets),"constant_bank_call_targets":len(constant_bank_targets),"constant_far_call_targets":len(far_call_targets),"constant_far_call_returns":len(far_call_returns),"banked_pointer_table_targets":len(far_table_targets),"banked_pointer_tables":far_table_reports,"bank_context_targets":len(bank_context_targets),"indexed_call_targets":len(indexed_call_targets),"indexed_call_returns":len(indexed_call_returns),"indexed_call_tables":indexed_call_reports,"ram_callback_targets":len(ram_callback_targets),"ram_callback_returns":len(ram_callback_returns),"ram_callback_records":ram_callback_report.get("records",[]),"ram_callback_analysis_limits":{"pair_limit_reached":ram_callback_report.get("pair_limit_reached",False),"exhausted_contexts":ram_callback_report.get("exhausted_contexts",[])},"total_blocks_after_static_closure":len(blocks),"input_exploration":exploration_report,"scenarios":scenario_reports,"blocks":blocks},indent=2)+"\n")
     emit_native_blocks(blocks,out)
     return blocks
 
@@ -1335,6 +1339,6 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
     return blocks
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument("rom",type=pathlib.Path);p.add_argument("--out",type=pathlib.Path,default=pathlib.Path("build"));p.add_argument("--steps",type=int,default=100000);p.add_argument("--auto-steps",action="store_true");p.add_argument("--auto-max-steps",type=int,default=50_000_000);p.add_argument("--auto-chunk-steps",type=int);p.add_argument("--auto-plateau-chunks",type=int,default=3);p.add_argument("--auto-min-new-blocks",type=int,default=1);p.add_argument("--auto-inputs",action="store_true");p.add_argument("--input-max-branches",type=int,default=128);p.add_argument("--input-max-depth",type=int,default=4);p.add_argument("--input-branch-steps",type=int,default=150_000);p.add_argument("--input-max-steps",type=int,default=20_000_000);p.add_argument("--input-sweep-steps",type=int,default=0);p.add_argument("--input-hold-frames",type=int,default=4);p.add_argument("--input-snapshot-interval-frames",type=int,default=4);p.add_argument("--input-max-snapshots",type=int,default=1024);p.add_argument("--input-bridge-states-per-depth",type=int,default=8);p.add_argument("--input-script",action="append",default=[],metavar="PULSES",help="merge a trace such as start@512:8,a@560:4");ns=p.parse_args()
-    blocks=compile_trace(ns.rom,ns.out,ns.steps,[parse_input_script(s) for s in ns.input_script],ns.auto_steps,ns.auto_max_steps,ns.auto_chunk_steps,ns.auto_plateau_chunks,ns.auto_min_new_blocks,ns.auto_inputs,ns.input_max_branches,ns.input_max_depth,ns.input_branch_steps,ns.input_max_steps,ns.input_hold_frames,ns.input_snapshot_interval_frames,ns.input_max_snapshots,ns.input_bridge_states_per_depth,ns.input_sweep_steps);print(f"wrote {len(blocks)} traced static blocks to {ns.out/'translated_trace.s'}")
+    p=argparse.ArgumentParser();p.add_argument("rom",type=pathlib.Path);p.add_argument("--out",type=pathlib.Path,default=pathlib.Path("build"));p.add_argument("--steps",type=int,default=100000);p.add_argument("--coverage-profile",action="append",default=[],type=pathlib.Path,help="merge validated coverage from this exact ROM (repeatable)");p.add_argument("--auto-steps",action="store_true");p.add_argument("--auto-max-steps",type=int,default=50_000_000);p.add_argument("--auto-chunk-steps",type=int);p.add_argument("--auto-plateau-chunks",type=int,default=3);p.add_argument("--auto-min-new-blocks",type=int,default=1);p.add_argument("--auto-inputs",action="store_true");p.add_argument("--input-max-branches",type=int,default=128);p.add_argument("--input-max-depth",type=int,default=4);p.add_argument("--input-branch-steps",type=int,default=150_000);p.add_argument("--input-max-steps",type=int,default=20_000_000);p.add_argument("--input-sweep-steps",type=int,default=0);p.add_argument("--input-hold-frames",type=int,default=4);p.add_argument("--input-snapshot-interval-frames",type=int,default=4);p.add_argument("--input-max-snapshots",type=int,default=1024);p.add_argument("--input-bridge-states-per-depth",type=int,default=8);p.add_argument("--input-script",action="append",default=[],metavar="PULSES",help="merge a trace such as start@512:8,a@560:4");ns=p.parse_args()
+    blocks=compile_trace(ns.rom,ns.out,ns.steps,[parse_input_script(s) for s in ns.input_script],ns.auto_steps,ns.auto_max_steps,ns.auto_chunk_steps,ns.auto_plateau_chunks,ns.auto_min_new_blocks,ns.auto_inputs,ns.input_max_branches,ns.input_max_depth,ns.input_branch_steps,ns.input_max_steps,ns.input_hold_frames,ns.input_snapshot_interval_frames,ns.input_max_snapshots,ns.input_bridge_states_per_depth,ns.input_sweep_steps,coverage_profiles=ns.coverage_profile);print(f"wrote {len(blocks)} traced static blocks to {ns.out/'translated_trace.s'}")
 if __name__ == "__main__":main()
