@@ -1032,9 +1032,10 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
     emit_native_blocks(blocks,out)
     return blocks
 
-def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,include_block_table=True,optimize_pure_chains=True):
+def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,include_block_table=True,optimize_pure_chains=True,max_fused_regions=128):
     """Emit validated block metadata without repeating reference discovery."""
     if max_hot_chains is not None and max_hot_chains<0:raise ValueError('negative hot chain limit')
+    if max_fused_regions<0:raise ValueError('negative fused region limit')
     blocks=[dict(block) for block in blocks]
     for block in blocks:
         pc=block['pc'];raws=[bytes.fromhex(x) for x in (block['bytes'],*block.get('observed_variants',[]))]
@@ -1105,12 +1106,52 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
     hot_targets=set(hot_candidates if max_hot_chains is None else hot_candidates[:max_hot_chains])
     constant_costs={key:next(iter(costs)) for key,costs in incoming_costs.items()
                     if optimize_pure_chains and key in hot_targets and len(costs)==1 and None not in costs}
+    # Short immutable-ROM register runs may share one scheduler guard. No
+    # memory access, helper, mapper change or CPU-control instruction may be
+    # skipped between guards. Keep EVERY ordinary entry/body as the fallback,
+    # including entries in the middle of a region. The biased d7 deadline
+    # already incorporates the next enabled IRQ edge, not just the 200T cap.
+    candidates=[]
+    for start in sorted(hot_targets) if optimize_pure_chains and max_fused_regions else ():
+        sequence=[];key=start;cost=0
+        for _ in range(8):
+            block=block_by_key.get(key)
+            if block is None or block.get('observed_variants') or not 0<=block['pc']<0x8000:break
+            body=native_body(block);cycles=pure_cycles(block,body) if body is not None else None
+            if cycles is None:break
+            target=block['pc']+len(bytes.fromhex(block['bytes']))
+            # Do not infer a bank across a logical cartridge window edge.
+            window_end=0x4000 if block['pc']<0x4000 else 0x8000
+            next_key=(block['bank'],target)
+            if target>=window_end or next_key not in block_by_key:break
+            if body[-2:]!=[f'move.w #${target:04X},gb_pc','jmp gb_dispatch']:break
+            if cost+cycles>=SCHEDULER_BATCH_T_CYCLES:break
+            sequence.append(key);cost+=cycles;key=next_key
+        if len(sequence)>=3:
+            hits=block_by_key[start]['hits']
+            # Ten bytes per statement conservatively bounds the added native
+            # code, including local branches; labels need no storage.
+            estimate=96+sum(10*len(native_body(block_by_key[item])[:-2]) for item in sequence)
+            candidates.append((-(hits*(len(sequence)-1)),start,sequence,key,cost,estimate))
+    fused_regions={};claimed=set();fusion_bytes=0
+    for _,start,sequence,target,cost,estimate in sorted(candidates):
+        if len(fused_regions)>=max_fused_regions:break
+        if any(key in claimed for key in sequence) or fusion_bytes+estimate>32768:continue
+        fused_regions[start]=(sequence,target,cost)
+        claimed.update(sequence);fusion_bytes+=estimate
     elided_cycle_stores=0
     entry=next((b for b in blocks if b["bank"] == 0 and b["pc"] == 0x100),blocks[0])
     lines=["; Trace-guided static LR35902 -> 68000 block output.","\txdef gb_compiled_entry,gb_compiled_block_table,gb_dispatch_tree"]
     lines += ["gb_compiled_entry:",f"\tbra.w {label(entry)}",""]
     for block in blocks:
         lines.append(f"{label(block)}:")
+        key=(block['bank'],block['pc'])
+        if key in fused_regions:
+            _,_,cost=fused_regions[key];stem=f"B{key[0]:03X}_{key[1]:04X}"
+            lines += ["\ttst.b gb_force_tick",f"\tbne.s .fused_slow_{stem}",
+                      "\ttst.b gb_ei_delay",f"\tbne.s .fused_slow_{stem}",
+                      f"\tcmpi.w #{SCHEDULER_BATCH_T_CYCLES-cost},d7",f"\tbhs.s .fused_slow_{stem}",
+                      f"\tjmp gb_fused_{stem}",f".fused_slow_{stem}:"]
         variants=[block]
         for raw_hex in block.get("observed_variants",[]):
             raw=bytes.fromhex(raw_hex);operand=raw[1] if len(raw)==2 else (raw[1]|raw[2]<<8 if len(raw)==3 else 0)
@@ -1164,6 +1205,15 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
                 lines += [f"\tmove.w #${variant['bank']:04X},gb_bank",f"\tmove.w #${variant['pc']:04X},gb_pc",
                           f"\tmove.b #${variant['opcode']:02X},gb_opcode",f"\tmove.w #${variant['operand']:04X},gb_operand",
                           f"\tjsr gbop_{variant['family'].lower()}","\tjmp gb_dispatch",""]
+    for start,(sequence,target,cost) in sorted(fused_regions.items()):
+        stem=f"B{start[0]:03X}_{start[1]:04X}"
+        lines += [f"gb_fused_{stem}:"]
+        for key in sequence:
+            # Unique local labels are needed for arithmetic/flag branches in
+            # the duplicated bodies. Every GB flag update is retained.
+            body=native_body({**block_by_key[key],'variant_suffix':f'_FUSED_{stem}'})
+            lines += ['\t'+line for line in body[:-2]]
+        lines += [f"\taddi.w #{cost},d7",f"\tjmp {label(block_by_key[target])}",""]
     # Hot constant successors above jump through these shared chain stubs.
     # gb_tick may redirect execution for an IRQ, so validate PC/bank before
     # entering the successor. Returns, JP (HL), mapper changes, and IRQ entry
@@ -1258,6 +1308,13 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
         "optimize_pure_chains":optimize_pure_chains,
         "constant_cycle_chain_targets":len(constant_costs),
         "elided_cycle_stores":elided_cycle_stores,
+        "fused_register_regions":len(fused_regions),
+        "fused_register_instructions":sum(len(region[0]) for region in fused_regions.values()),
+        "fused_register_estimated_bytes":fusion_bytes,
+        "fused_register_region_limit":max_fused_regions,
+        "fused_register_runs":[{"bank":start[0],"pc":start[1],"instruction_pcs":[key[1] for key in sequence],
+                                "target_pc":target[1],"cycles":cost}
+                               for start,(sequence,target,cost) in sorted(fused_regions.items())],
         "block_catalog_included":include_block_table,
         "block_catalog_bytes":8*(len(blocks)+1) if include_block_table else 8,
         "dispatch_format":"bank_page_table" if use_pages else "balanced_tree",

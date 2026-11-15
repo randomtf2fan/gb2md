@@ -12,6 +12,25 @@ class AssemblerRetryTests(unittest.TestCase):
         assembler=root/'assembler';assembler.touch()
         return source,assembler
 
+    def test_capacity_retry_preserves_explicit_register_fusion_limit(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);source,assembler=self.source(root);calls=[]
+            original=compiler.compile_trace
+            def discover(*args,**kwargs):
+                blocks=original(*args,**kwargs)
+                compiler.emit_native_blocks(blocks,args[1],max_fused_regions=0)
+                return blocks
+            def assemble(command,**kwargs):
+                calls.append(command)
+                Path(command[-1]).write_bytes(bytes(0x400002 if len(calls)==1 else 0x80000))
+                return subprocess.CompletedProcess(command,0,'','')
+            with patch.object(compiler,'compile_trace',side_effect=discover),patch.object(compiler.subprocess,'run',side_effect=assemble):
+                compiler.build(source,root/'out',20,assembler=assembler)
+            stats=json.loads((root/'out/native-codegen-report.json').read_text())
+            self.assertEqual(len(calls),2)
+            self.assertFalse(stats['block_catalog_included'])
+            self.assertEqual(stats['fused_register_region_limit'],0)
+
     def test_convergence_failure_retries_without_retracing(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);source,assembler=self.source(root);calls=[]

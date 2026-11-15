@@ -1,5 +1,59 @@
 # GB2MD compatibility status
 
+## Guarded native register runs — 2026-11-15
+
+Native code generation now groups selected runs of three to eight immutable-ROM
+register instructions behind a shared timing guard. It preserves every source
+entry, arithmetic operation and flag update. Memory access, helpers, CPU control,
+dynamic opcode variants and cartridge-window crossings are excluded. A forced
+tick, delayed EI, or insufficient time before the next scheduler/interrupt
+boundary falls back to the ordinary instructions. CPU and peripheral algorithms
+are unchanged. Selection is bounded to 128 disjoint runs and a conservative
+32 KiB added-code estimate. `--no-chain-opt` disables this and constant-cycle
+chain specialization; normal GUI/CLI builds enable them after recompilation.
+
+Measured results:
+
+- Original four-register loop, equal Genesis-frame intervals, fusion alone:
+  **1.2683x** source-cycle throughput with interrupts masked, **1.2431x** with
+  VBlank enabled. These are synthetic workloads, not game FPS.
+- Public `benchmark_chains.py --fusion-only` smoke (60-frame warmup and
+  observation intervals): its five-register loop measured **1.3390x**, while
+  the memory and video control loops measured **1.0000x**. These are different
+  fixtures/intervals from the preceding four-register benchmark.
+- Same-coverage Tetris rebuild: 7,187 entries retained, 68 regions containing
+  252 instructions, 8,878 additional ROM bytes. Matching-input active-play
+  interval: **13.88 versus 13.82 simulated GB fps**, normalized to 60 Genesis
+  frames/second. Pieces and phase alignment differ, so the approximately 0.4%
+  increase does **not** demonstrate a gameplay-speed improvement. Do not compare
+  this run's earlier, faster loss screen with baseline active gameplay.
+- Live SDL input reached gameplay, soft drops, score 31, the next-piece preview,
+  GAME OVER, top-score name entry, and a second controllable game. Six A
+  confirmations entered the name, after which Start worked. This explains the
+  earlier Start-alone observation on this route; no game-specific patch was
+  needed. All missing-block markers/counters remained zero over 14,904 Genesis
+  frames. Rendering/clipping issues remain; line clearing and physical hardware
+  were not retested in this image. Coverage was reused, not freshly discovered.
+
+Validation: focused module **4/4 PASS**, including ten native on/off scenarios
+for registers, flags, clock samples and adjacent IRQ-return alignments. All
+**193 unit methods are covered and passing**: 192 passed in two native-enabled
+batches of 96, and a later cartridge-size retry regression passed separately.
+Final fast suites in both checkouts pass **174 / 19 native-only skips**.
+The final retry change preserves an explicitly disabled fusion limit when
+assembly is repeated; the default gameplay image rebuilt byte-for-byte equal
+to the tested image. The selected external regression passes **43/43 in both
+Python and native Genesis execution** (timing 14, timer/register 14, interrupt
+controls 5, broader memory/HALT survey 10). No failures or timeouts remain in
+these selected runs; full hardware or game compatibility is not claimed.
+
+Reproduce the public original-code benchmark using an installed assembler and
+an explicitly selected isolated BlastEm wrapper:
+
+```sh
+GB2MD_VASM=/path/to/vasmm68k_mot python3 benchmark_chains.py --fusion-only --blastem /path/to/isolated-blastem-wrapper --out compat-builds/register-fusion --frames 180
+```
+
 ## Native read-modify-write bus phases — 2026-11-15
 
 INC/DEC(HL) and modifying CB(HL) instructions previously read after charging

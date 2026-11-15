@@ -6,7 +6,10 @@ FPS. Baseline and optimized modes compile identical dynamically traced entries.
 """
 import argparse,json,os,re,shutil
 from pathlib import Path
+from unittest.mock import patch
+import build_recompiled as compiler
 from build_recompiled import build
+from trace_recompiler import emit_native_blocks
 from run_compat_tests import _run_in_pty,_blastem_values
 
 
@@ -25,6 +28,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out',type=Path,default=Path('compat-builds/chain-benchmark'))
     parser.add_argument('--frames',type=int,default=180)
+    parser.add_argument('--fusion-only',action='store_true',help='keep constant-cycle chains enabled in both modes; compare register fusion alone')
     parser.add_argument('--blastem',type=Path,default=Path(os.environ.get('GB2MD_BLASTEM') or shutil.which('blastem') or 'blastem'))
     args=parser.parse_args()
     if not 60<=args.frames<=1800:parser.error('frames must be60..1800')
@@ -34,7 +38,15 @@ def main():
         source=args.out/(workload+'.gb');source.write_bytes(benchmark_rom(workload));modes={}
         for enabled in (False,True):
             name='optimized' if enabled else 'baseline';out=args.out/workload/name
-            artifact=build(source,out,2000,optimize_pure_chains=enabled)
+            if args.fusion_only:
+                original=compiler.compile_trace
+                def discover(*trace_args,**trace_kwargs):
+                    blocks=original(*trace_args,**trace_kwargs)
+                    emit_native_blocks(blocks,trace_args[1],max_fused_regions=128 if enabled else 0)
+                    return blocks
+                with patch.object(compiler,'compile_trace',side_effect=discover):
+                    artifact=build(source,out,2000)
+            else:artifact=build(source,out,2000,optimize_pure_chains=enabled)
             query='p/x [$ff0002].w [$ff0010].w [$ff0018].l [$ff0038].l [$ff0020].l\n'
             commands=f'frames {args.frames}\n'+query+f'frames {args.frames}\n'+query+'quit\n'
             code,output,timed=_run_in_pty([str(args.blastem.resolve()),'-d',str(artifact.resolve())],commands,max(30,args.frames//30+15))
@@ -46,9 +58,9 @@ def main():
                 raise RuntimeError('CPU escaped benchmark loop')
             profile=json.loads((out/'trace-profile.json').read_text());stats=json.loads((out/'native-codegen-report.json').read_text())
             delta=(cycles[1]-cycles[0])&0xFFFFFFFF
-            modes[name]={'cycles':cycles,'interval_cycles':delta,'source_cycles_per_genesis_frame':delta/args.frames,'rom_bytes':artifact.stat().st_size,'entries':len(profile['blocks']),'constant_cycle_chain_targets':stats['constant_cycle_chain_targets'],'elided_cycle_stores':stats['elided_cycle_stores']}
+            modes[name]={'cycles':cycles,'interval_cycles':delta,'source_cycles_per_genesis_frame':delta/args.frames,'rom_bytes':artifact.stat().st_size,'entries':len(profile['blocks']),'constant_cycle_chain_targets':stats['constant_cycle_chain_targets'],'elided_cycle_stores':stats['elided_cycle_stores'],'fused_register_regions':stats['fused_register_regions']}
         modes['throughput_ratio']=modes['optimized']['interval_cycles']/modes['baseline']['interval_cycles'];results[workload]=modes
-    report={'scope':'Original loops only; not measured game FPS or whole-system profiling','genesis_frames_per_interval':args.frames,'results':results}
+    report={'scope':'Original loops only; not measured game FPS or whole-system profiling','fusion_only':args.fusion_only,'genesis_frames_per_interval':args.frames,'results':results}
     (args.out/'benchmark.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps(report,indent=2))
 
 

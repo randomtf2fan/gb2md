@@ -901,6 +901,42 @@ compact and unoptimized paths are tested. The DI and second HALT-timing ROMs
 also pass with exactly the same discovered source entries/variants as before.
 No additional trace steps, test-specific addresses or interpreter were added.
 
+## Guarded pure-register runs (2026-11-15)
+
+`emit_native_blocks()` can duplicate short, frequently traced ROM sequences
+into `gb_fused_*` native regions. Each region contains three to eight register
+instructions from one cartridge window. It excludes memory accesses, helper
+calls, dynamic opcode variants, CPU control, and bank-window crossings. Every
+original instruction entry and body remains available for branches, returns,
+interrupts and the slow path; this pass discovers no new source code.
+
+One entry guard checks `gb_force_tick`, `gb_ei_delay`, and whether biased `d7`
+plus the complete region cost is strictly below the 200T boundary. Equality
+falls back to the original per-instruction code. Because `gb_batch_bias`
+already incorporates the next enabled interrupt event, a successful guard
+cannot skip an interrupt-service boundary. The fast path emits the existing
+arithmetic and **all** flag updates, adds the exact summed source cycles once,
+and enters the ordinary successor. It caches no guest registers and introduces
+no new runtime state, clock multiplier or peripheral behavior.
+
+Candidate selection is deterministic, ranked by trace hits and the number of
+chains eliminated. Regions do not overlap. The default ceiling is 128 regions
+and a conservative 32 KiB added-code estimate. Reducing the hot-stub quota
+during cartridge-size retries also reduces eligible starts; zero hot stubs
+disables fusion. Capacity retries preserve the configured region limit,
+including an explicit zero. `max_fused_regions=0` disables only this pass for backend A/B
+tests. `optimize_pure_chains=False` / `--no-chain-opt` disables both this pass
+and constant-cycle chain specialization. GUI builds use the sibling compiler's
+default after recompilation; existing binaries do not change.
+
+`native-codegen-report.json` records `fused_register_regions`,
+`fused_register_instructions`, `fused_register_estimated_bytes`, the region
+limit, and each selected run's PCs, successor and T-cycle sum. Original
+regression fixtures in `tests/test_register_fusion.py` check safety exclusions,
+retained entries, capacity limits, and native on/off register/flag, clock-sample
+and interrupt-return equivalence. Performance results must identify their
+workload: an improvement in a register loop does not establish game speed.
+
 ## Native read-modify-write bus phases (2026-11-15)
 
 `native_body` routes INC/DEC(HL) and modifying CB(HL) operations through
