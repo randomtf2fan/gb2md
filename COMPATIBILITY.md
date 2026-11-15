@@ -1,5 +1,65 @@
 # GB2MD compatibility status
 
+## Event-aware native interrupt batching — 2026-11-15
+
+Straight-line native batches could postpone an interrupt event until a later DI
+had already disabled IME. The scheduler now bounds batches by the next enabled
+modeled timer reload, VBlank or STAT edge, retaining the existing200T cap.
+Virtual credit in `gb_batch_bias` shortens the unchanged chain comparisons;
+`gb_tick` subtracts it before updating source clocks. No instruction cycle
+multiplier, per-instruction interpreter or game-specific rule was added.
+Explicit HALT idle chunks clear the credit before loading real elapsed cycles.
+
+An original timer-edge program reproduced the missed interrupt. Its fixed
+version matches Python's IRQ outcome, saved return PC, IF and DIV around the
+edge, including a case where the request precedes a final NOP rather than DI.
+Default, compact and unoptimized native chains pass. The reference CPU,
+trace budgets, discovered control flow and controller scripts are unchanged.
+
+Validation:
+
+- **186/186 native-enabled unit tests PASS** in786.847 seconds.
+- Public fast suite: **169 PASS, 17 native methods skipped**, 8.421 seconds.
+- Fresh wider compatibility: **43 Python PASS; native42 PASS / 1 FAIL**.
+  Instruction timing14/14, timers/register14/14 and EI/IRQ controls5/5 pass
+  both backends. The ten-case interrupt/HALT/memory survey is now9 native
+  passes, with only Blargg `03-modify_timing` still trapping at0:C3E9.
+- `di_timing-GS` and `halt_ime1_timing2-GS` now independently PASS native.
+  Their discovered entries/byte variants are identical before and after:
+  16,692 and771 entries respectively. More tracing was not required.
+
+Original register-loop throughput over Genesis frames600..900 measured the
+cost of this correctness change against runtime2d6e78a:
+
+| Original workload | Prior source-clock GB FPS | Event-aware | Ratio |
+|---|---:|---:|---:|
+| IRQ masked | 2.8743 | 2.8507 | 0.9918 |
+| VBlank enabled, minimal handler | 2.8045 | 2.6329 | 0.9388 |
+
+These are source-clock measurements on synthetic loops, not gameplay or
+wall-clock FPS. They show approximately0.8% and6.1% overhead in these cases,
+not a speedup or a general bound. Hardware timing accuracy remains incomplete:
+STAT uses the existing fixed PPU modes, native IME0 HALT-bug handling is not
+implemented fully, and broader bus/PPU/mapper behavior remains open. No new
+commercial gameplay or physical-console result is claimed. Checkpoints intact.
+
+Next diagnosis: original memory-modify programs reproduce incorrect INC/DEC
+and CB read-modify-write values/flags at a timer boundary; a read-only BIT
+control matches. The remaining external modify trap still needs the general
+bus-phase fix and independent native verification. Those fixes are not part
+of this interrupt-batching revision.
+
+Reproduce the selected interrupt cases using external fixtures/tools:
+
+```sh
+GB2MD_NATIVE_TESTS=1 GB2MD_BLASTEM=/path/to/isolated-blastem-wrapper GB2MD_VASM=/path/to/vasmm68k_mot python3 -m unittest discover -s tests -q
+python3 run_compat_tests.py test_roms/mooneye-test-suite/acceptance/di_timing-GS.gb test_roms/mooneye-test-suite/acceptance/halt_ime1_timing2-GS.gb --max-steps 300000 --compile-native --native-output compat-builds/local-irq-event --run-native-blastem --blastem /path/to/isolated-blastem-wrapper --native-frames 900 --native-timeout 45 --json compat-results/local-irq-event.json
+```
+
+All automated emulator runs remain on the isolated virtual display. The GUI
+needs no new option; restart and recompile to use the current runtime.
+
+
 ## Bounded interrupt/HALT and memory survey — 2026-11-13
 
 No compiler, runtime, GUI or fixture changes in this survey; tested implementation

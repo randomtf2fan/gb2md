@@ -54,6 +54,7 @@ gb_bank_dirty equ $FF0057
 gb_irq_entry equ $FF0058
 gb_fetch_bytes equ $FF0059       ; three sampled bytes for native variant guards
 gb_bus_write_charged equ $FF005C ; stack bus phase already advanced by sequencer
+gb_batch_bias equ $FF005E        ; virtual credit: 200 - next IRQ event distance
 gb_io equ $FF0100
 gb_hram equ $FF0180
 gb_oam equ $FF0200
@@ -857,6 +858,7 @@ gb_halt_wait:
 	move.l d2,d1
 .halt_timer_target_ready:
 	clr.b gb_step_cycles
+	clr.w gb_batch_bias             ; the explicit idle chunk replaces d7
 	cmpi.l #32760,d1
 	bls.s .halt_timer_last_chunk
 	move.w #32760,d7
@@ -916,6 +918,7 @@ gb_halt_wait:
 	move.w #456,d0
 .halt_stat_target:
 	sub.w gb_ly_accum,d0
+	clr.w gb_batch_bias
 	move.w d0,d7
 	clr.b gb_step_cycles
 	bsr.w gb_tick
@@ -1151,6 +1154,8 @@ gb_tick:
 	moveq #0,d6
 	move.b gb_step_cycles,d6
 	add.w d7,d6
+	sub.w gb_batch_bias,d6          ; virtual chain credit is not source time
+	clr.w gb_batch_bias
 	clr.w d7
 	add.w gb_cycle_batch,d6
 	clr.w gb_cycle_batch
@@ -1341,6 +1346,13 @@ gb_tick:
 	clr.w gb_bank
 	move.w d3,gb_pc
 .tick_done:
+	tst.b gb_ime
+	beq.s .tick_return
+	move.b gb_ie,d0
+	andi.b #$1F,d0
+	beq.s .tick_return
+	bsr.w gb_refresh_batch_bias
+.tick_return:
 	rts
 ; Charge one interrupt-entry phase without recursive IRQ arbitration.
 ; d0.w is T-cycles. Keep stack-pointer/vector temporaries live across gb_tick.
@@ -1354,6 +1366,95 @@ gb_irq_advance:
 	rts
 gb_timer_periods:
 	dc.w 1024,16,64,256
+
+; Bound direct chaining by the next enabled interrupt event as well as 200T.
+; d7 holds real pending cycles plus this credit, so existing chain comparisons
+; need no extra per-instruction checks. gb_tick subtracts the credit once.
+; Refresh only with IME and at least one IE bit enabled, after real ticks.
+gb_refresh_batch_bias:
+	movem.l d0-d6/a0-a1,-(sp)
+	move.l #200,d0
+	move.b gb_io+$0F,d1
+	and.b gb_ie,d1
+	andi.b #$1F,d1
+	bne.w .batch_pending
+	; Only LY143 can reach VBlank within the normal 200T batch cap.
+	btst #0,gb_ie
+	beq.s .batch_stat
+	cmpi.b #143,gb_io+$44
+	bne.s .batch_stat
+	move.w #456,d1
+	sub.w gb_ly_accum,d1
+	cmp.w d0,d1
+	bhs.s .batch_stat
+	move.w d1,d0
+.batch_stat:
+	; STAT uses the modeled fixed mode/line edges. Stop at the next edge
+	; conservatively even if the combined STAT line stays high at that edge.
+	btst #1,gb_ie
+	beq.s .batch_timer
+	btst #7,gb_io+$40
+	beq.s .batch_timer
+	move.b gb_io+$41,d1
+	andi.b #$78,d1
+	beq.s .batch_timer
+	move.w #456,d1
+	cmpi.b #144,gb_io+$44
+	bhs.s .batch_stat_edge
+	move.w #80,d1
+	cmp.w gb_ly_accum,d1
+	bhi.s .batch_stat_edge
+	move.w #252,d1
+	cmp.w gb_ly_accum,d1
+	bhi.s .batch_stat_edge
+	move.w #456,d1
+.batch_stat_edge:
+	sub.w gb_ly_accum,d1
+	cmp.w d0,d1
+	bhs.s .batch_timer
+	move.w d1,d0
+.batch_timer:
+	btst #2,gb_ie
+	beq.s .batch_ready
+	moveq #0,d1
+	move.w gb_timer_accum,d1
+	bne.s .batch_timer_compare
+	btst #2,gb_io+$07
+	beq.s .batch_ready
+	moveq #0,d2
+	move.b gb_io+$07,d2
+	andi.w #3,d2
+	add.w d2,d2
+	lea gb_timer_periods(pc),a0
+	moveq #0,d3
+	move.w (a0,d2.w),d3
+	moveq #0,d2
+	move.b gb_io+$04,d2
+	lsl.w #8,d2
+	or.w gb_div_accum,d2
+	move.w d3,d4
+	subq.w #1,d4
+	and.w d2,d4
+	move.l d3,d1
+	sub.w d4,d1                    ; next selected divider falling edge
+	move.w #255,d2
+	sub.b gb_io+$05,d2
+	mulu d3,d2
+	add.l d2,d1
+	addq.l #4,d1                   ; overflow reload raises IF
+.batch_timer_compare:
+	cmp.l d0,d1
+	bhs.s .batch_ready
+	move.w d1,d0
+	bra.s .batch_ready
+.batch_pending:
+	moveq #0,d0
+.batch_ready:
+	move.w #200,d7
+	sub.w d0,d7
+	move.w d7,gb_batch_bias
+	movem.l (sp)+,d0-d6/a0-a1
+	rts
 
 ; Advance OAM DMA by d6.w T-cycles. Startup/restart edges are processed one
 ; M-cycle at a time; once no pipeline transition is pending, contiguous bytes

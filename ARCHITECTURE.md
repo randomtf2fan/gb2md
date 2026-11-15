@@ -861,3 +861,42 @@ from original source. These changes do not establish full CPU bus/DMA
 restrictions or general PPU accuracy. Independent timing references are
 [Mooneye PUSH](https://github.com/Gekkio/mooneye-test-suite/blob/main/acceptance/push_timing.s)
 and [CALL](https://github.com/Gekkio/mooneye-test-suite/blob/main/acceptance/call_timing2.s).
+
+## Event-aware native interrupt batches (2026-11-15)
+
+Native chain stubs retain their existing200T cap and constant incoming-cost
+checks. `gb_refresh_batch_bias` shortens that cap near an enabled interrupt
+event without adding per-instruction memory checks. When IME and IE permit
+interrupts, it calculates the next modeled timer reload, VBlank edge or STAT
+mode/line edge, clamped to200T. A pending enabled IF bit has distance0.
+
+`gb_batch_bias` at$FF005E stores virtual credit `200-distance`. After a tick,
+d7 starts at this credit; chaining adds the costs of completed instructions
+as before. The unchanged200T comparisons therefore flush the instruction
+that reaches the event. `gb_tick` subtracts the credit before updating any
+clock and resets it before nested peripheral/IRQ phases. Its real input is:
+
+```text
+gb_step_cycles + d7 - gb_batch_bias + gb_cycle_batch
+```
+
+The credit is never Game Boy time. It does not change CPU instruction costs
+or multiply the source clock. Explicit HALT paths that replace d7 with real
+idle cycles clear the credit first. Renderer register saves preserve d7.
+Interrupt-disabled work skips deadline calculation and keeps normal batching.
+
+Timer distance uses an existing pending reload countdown, or the next selected
+divider falling edge plus remaining TIMA increments and four reload cycles.
+Only LY143 can reach VBlank within200T; STAT conservatively stops at the next
+mode/line boundary under the existing fixed-length PPU model. This is not a
+new PPU model, serial controller, or full bus-accurate peripheral scheduler.
+Native IME0 HALT-bug behavior and other hardware edge cases remain incomplete.
+
+Previously a timer/VBlank request could remain unprocessed in a straight-line
+batch while a later DI disabled IME. Flushing only on entry to DI would still
+save the wrong return PC when the event preceded a final NOP. Original fixtures
+in `tests/test_irq_batch_deadline.py` compare IRQ outcome, exact saved PC, IF
+and a DIV sample with Python across neighboring alignments. Native default,
+compact and unoptimized paths are tested. The DI and second HALT-timing ROMs
+also pass with exactly the same discovered source entries/variants as before.
+No additional trace steps, test-specific addresses or interpreter were added.
