@@ -1,5 +1,63 @@
 # GB2MD compatibility status
 
+## Native read-modify-write bus phases — 2026-11-15
+
+INC/DEC(HL) and modifying CB(HL) instructions previously read after charging
+both read and write phases together. At a TIMA overflow/reload boundary they
+could load the wrong byte, compute wrong flags, or accept a write that should
+be ignored. They now use `gb_rmw_read8`/`gb_rmw_write8` for phased OAM/I/O/IE
+accesses. Arithmetic and flags remain statically emitted68000 code. BIT(HL)
+keeps its read-only12T path; ordinary memory retains guarded batched accesses.
+
+An original timer-window program reproduced these differences before fixing:
+
+| Operation | Python data/flags | Old native data/flags | Phased native |
+|---|---|---|---|
+| INC(HL) | $00 / $A0 | $01 / $00 | Matches Python |
+| DEC(HL) | $FE / $40 | $FF / $60 | Matches Python |
+| RLC(HL) | $36 / $80 | $6B / $00 | Matches Python |
+| BIT0(HL), read-only control | $35 / $A0 | Matches Python | Still matches |
+
+The helper read charges remaining cost minus4T, then the write charges the
+last4T and uses the existing precharged-write gate to preserve reload windows.
+The pair's4T remainder distinguishes phased accesses; unphased modifying
+instructions retain at least8T, including a sampled CB fetch prefix. This is
+an internal native helper contract, not a source-opcode interpreter. No CPU,
+PPU, timer or DMA algorithm was replaced and no game-specific rule was added.
+
+Validation:
+
+- Focused original fixtures: two methods, nine native scenarios PASS in91.875
+  seconds, covering modifying groups, BIT, WRAM, OAM and IE; values/flags and
+  diagnostic state match Python.
+- Fresh fast suite: **170 PASS, 18 native methods skipped** (188 discovered).
+- Full native-enabled unit regression: **188/188 PASS** in878.920 seconds.
+- Fresh selected43-ROM compatibility regression: **43/43 PASS in both Python
+  and native execution**, including instruction14, timer/register14, EI/IRQ5
+  and expanded interrupt/HALT/memory survey10. All three November13 traps
+  are resolved; this is not a claim about the entire fixture collection.
+- Blargg `mem_timing/individual/03-modify_timing` now independently reports
+  native serial `Passed` instead of trapping at0:C3E9. Its434 source entries
+  and byte variants are identical; more tracing was not required.
+
+These changes do not establish full Game Boy hardware compatibility or speed.
+Ordinary-memory accesses racing DMA, bus restrictions, native IME0 HALT-bug
+handling, full PPU behavior and wider mapper support remain open. No fresh
+commercial gameplay or performance measurement was made for this RMW change.
+The original loop overhead measurements in the preceding interrupt milestone
+apply only to that change. Protected checkpoints and external fixtures intact.
+
+Reproduce with external tools and separately supplied immutable fixtures:
+
+```sh
+GB2MD_NATIVE_TESTS=1 GB2MD_BLASTEM=/path/to/isolated-blastem-wrapper GB2MD_VASM=/path/to/vasmm68k_mot python3 -m unittest discover -s tests -q
+python3 run_compat_tests.py test_roms/blargg/mem_timing/individual/03-modify_timing.gb --max-steps 300000 --compile-native --native-output compat-builds/local-modify --run-native-blastem --blastem /path/to/isolated-blastem-wrapper --native-frames 900 --native-timeout 45 --json compat-results/local-modify.json
+```
+
+All native tests run on the isolated virtual display. The GUI needs no new
+setting; restart and rebuild to use the sibling compiler/runtime updates.
+
+
 ## Event-aware native interrupt batching — 2026-11-15
 
 Straight-line native batches could postpone an interrupt event until a later DI

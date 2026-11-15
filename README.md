@@ -92,15 +92,15 @@ all obligations are reviewed. BlastEm is optional and likewise treated as an
 external local test dependency.
 
 The `test_roms/` collection and all input `.gb`/`.gbc` files are local fixtures
-and are ignored by the repository safety rules. The 169 focused unit tests use
+and are ignored by the repository safety rules. The 170 focused unit tests use
 synthetic data and do not require commercial ROMs. Compatibility-suite runs
 require the user to supply the relevant test ROMs separately.
 
-Seventeen additional native integration methods use original diagnostic ROMs
+Eighteen additional native integration methods use original diagnostic ROMs
 generated from test source: controller rows, static dispatch discovery, compact
 scheduler interrupt/mapper paths, missing dispatch slots/pages/banks, and
 far-call bank restoration, indexed record/RAM callbacks, preserving indexed calls,
-interrupt-entry cancellation, cross-window byte guards, timed stack reads, phased stack writes, and exact IRQ-boundary checks. Enable them with `GB2MD_NATIVE_TESTS=1`, `GB2MD_BLASTEM=/path/to/blastem` and
+interrupt-entry cancellation, cross-window byte guards, timed stack reads, phased stack writes, exact IRQ-boundary checks, and RMW bus phases. Enable them with `GB2MD_NATIVE_TESTS=1`, `GB2MD_BLASTEM=/path/to/blastem` and
 `GB2MD_VASM=/path/to/vasmm68k_mot` when running the unit suite. They check result memory plus missing-block diagnostics. BlastEm normally opens
 a window. For unattended testing on a shared desktop, use an isolated virtual
 display and explicitly select the X11 SDL driver; setting `DISPLAY` alone may

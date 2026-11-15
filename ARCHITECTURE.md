@@ -900,3 +900,31 @@ and a DIV sample with Python across neighboring alignments. Native default,
 compact and unoptimized paths are tested. The DI and second HALT-timing ROMs
 also pass with exactly the same discovered source entries/variants as before.
 No additional trace steps, test-specific addresses or interpreter were added.
+
+## Native read-modify-write bus phases (2026-11-15)
+
+`native_body` routes INC/DEC(HL) and modifying CB(HL) operations through
+`gb_rmw_read8` and `gb_rmw_write8`. BIT(HL) stays on the ordinary read-only
+12T path. The arithmetic, flags, rotations and bit operations remain statically
+emitted68000 statements; these helpers only sequence memory/peripheral time.
+
+OAM/I/O/IE operands read one M-cycle before the final write. The read helper
+charges the remaining opcode cost minus4T while deferring IRQ service, reads
+through the existing logical map, then leaves4T for the write helper. The
+write advances that phase before the store and uses `gb_bus_write_charged`
+to avoid redundant synchronization that could erase a TIMA reload window.
+Interrupt arbitration occurs after the complete opcode, with final flags/data.
+
+Plain RAM/HRAM/ROM operands retain existing batching through guarded helper
+paths. A phased read leaves exactly4T; all unphased modifying opcodes have at
+least8T remaining, including CB instructions whose two fetch bytes have been
+sampled by a cross-window guard. This is the helper-pair contract; it does not
+decode source opcodes at runtime or add another persistent state byte.
+
+An original TIMA-boundary fixture distinguishes reading$FF before overflow
+from reading$00 afterward, and checks writes on the subsequent reload cycle.
+It reproduces wrong INC/DEC and CB data/flags while a BIT control matches.
+`tests/test_rmw_bus_timing.py` covers modifying families, reload windows, plain
+WRAM, OAM and IE. The reference CPU and peripheral algorithms are unchanged.
+This does not fix every memory/bus interaction, including broader CPU access
+restrictions and ordinary-memory writes racing DMA; full PPU timing is open.

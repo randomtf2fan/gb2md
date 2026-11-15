@@ -1044,6 +1044,61 @@ gb_stat_sync:
 	movem.l (sp)+,d0-d3
 	rts
 
+; RMW memory operations read one M-cycle before their final write. Only
+; OAM/I/O/IE need a phased path; ordinary RAM keeps its existing batched cost.
+; Return d0.b, with exactly 4T remaining on the phased path. Even a sampled
+; CB fetch leaves at least 8T before this read, so 4T uniquely marks that path.
+gb_rmw_read8:
+	cmpi.w #$FE00,d1
+	blo.w gb_read8
+	cmpi.w #$FF80,d1
+	blo.s .rmw_read_timed
+	cmpi.w #$FFFF,d1
+	bne.w gb_read8
+.rmw_read_timed:
+	movem.l d1-d6/a0-a1,-(sp)
+	moveq #0,d0
+	move.b gb_defer_irq,d0
+	move.w d0,-(sp)
+	moveq #0,d0
+	move.b gb_step_cycles,d0
+	subq.w #4,d0
+	move.b #1,gb_defer_irq
+	move.b d0,gb_step_cycles
+	bsr.w gb_tick
+	clr.b gb_step_cycles
+	move.l 2(sp),d1
+	bsr.w gb_read8
+	move.w (sp)+,d1
+	move.b d1,gb_defer_irq
+	movem.l (sp)+,d1-d6/a0-a1
+	move.b #4,gb_step_cycles
+	move.b #1,gb_force_tick
+	rts
+
+; Complete the paired RMW write, preserving the value/address across ticking.
+; Flags and arithmetic remain in the statically emitted native instruction.
+gb_rmw_write8:
+	cmpi.b #4,gb_step_cycles
+	bne.w gb_write8
+	movem.l d0-d6/a0-a1,-(sp)
+	moveq #0,d0
+	move.b gb_defer_irq,d0
+	move.w d0,-(sp)
+	move.b #1,gb_defer_irq
+	bsr.w gb_tick
+	clr.b gb_step_cycles
+	move.l 2(sp),d0
+	move.l 6(sp),d1
+	move.b #1,gb_bus_write_charged
+	bsr.w gb_write8
+	clr.b gb_bus_write_charged
+	move.w (sp)+,d0
+	move.b d0,gb_defer_irq
+	movem.l (sp)+,d0-d6/a0-a1
+	move.b #1,gb_force_tick
+	rts
+
 ; Write d3.w for PUSH/CALL/RST to an OAM/I/O/IE stack window. gb_step_cycles
 ; is the remaining instruction cost (any sampled fetch prefix is excluded).
 ; Charge through the upper write, then one M-cycle through the lower write.

@@ -405,8 +405,8 @@ def native_body(block):
                 f"moveq #{prefix},d0","jsr gb_pop16_timed",f"bra.s .pop_ready_{stem}",f".pop_fast_{stem}:",
                 "moveq #0,d1","move.w gb_sp,d1","jsr gb_read8","moveq #0,d3","move.b d0,d3","moveq #0,d1","move.w gb_sp,d1","addq.w #1,d1",
                 "jsr gb_read8","lsl.w #8,d0","or.w d0,d3","addq.w #2,gb_sp",f".pop_ready_{stem}:"]
-    def load_r_d3(index):
-        if index==6:return ["moveq #0,d1","move.w gb_h,d1","jsr gb_read8","moveq #0,d3","move.b d0,d3"]
+    def load_r_d3(index,rmw=False):
+        if index==6:return ["moveq #0,d1","move.w gb_h,d1",f"jsr {'gb_rmw_read8' if rmw else 'gb_read8'}","moveq #0,d3","move.b d0,d3"]
         return ["moveq #0,d3",f"move.b {REGS[index]},d3"]
     def finish_logic(flagbase=0):
         return ["move.b d0,gb_a",f"moveq #${flagbase:02X},d1","tst.b d0",f"bne.s .logicnz_{stem}","ori.b #$80,d1",f".logicnz_{stem}:","move.b d1,gb_f"]
@@ -507,12 +507,12 @@ def native_body(block):
         if group==1:
             body += load_r_d3(reg)+["moveq #$20,d1","moveq #0,d0","move.b gb_f,d0","andi.b #$10,d0","or.b d0,d1",f"btst #{bit},d3",f"bne.s .bitset_{stem}","ori.b #$80,d1",f".bitset_{stem}:","move.b d1,gb_f"]
         elif group in (2,3):
-            body += load_r_d3(reg)+[f"{'bset' if group==3 else 'bclr'} #{bit},d3"]
-            if reg==6: body += ["moveq #0,d0","move.b d3,d0","moveq #0,d1","move.w gb_h,d1","jsr gb_write8"]
+            body += load_r_d3(reg,rmw=True)+[f"{'bset' if group==3 else 'bclr'} #{bit},d3"]
+            if reg==6: body += ["moveq #0,d0","move.b d3,d0","moveq #0,d1","move.w gb_h,d1","jsr gb_rmw_write8"]
             else: body += [f"move.b d3,{REGS[reg]}"]
         else:
             kind=(sub>>3)&7
-            body += load_r_d3(reg)+["moveq #0,d0"]
+            body += load_r_d3(reg,rmw=True)+["moveq #0,d0"]
             if kind==0:body += ["move.b d3,d0","lsr.b #7,d0","rol.b #1,d3"]
             elif kind==1:body += ["move.b d3,d0","andi.b #1,d0","ror.b #1,d3"]
             elif kind==2:body += ["moveq #0,d2","move.b gb_f,d2","lsr.b #4,d2","andi.b #1,d2","move.b d3,d0","lsr.b #7,d0","lsl.b #1,d3","or.b d2,d3"]
@@ -522,7 +522,7 @@ def native_body(block):
             elif kind==6:body += ["move.b d3,d2","lsl.b #4,d3","lsr.b #4,d2","or.b d2,d3"]
             else:body += ["move.b d3,d0","andi.b #1,d0","lsr.b #1,d3"]
             body += ["moveq #0,d1","tst.b d3",f"bne.s .cbnonzero_{stem}","ori.b #$80,d1",f".cbnonzero_{stem}:","tst.b d0",f"beq.s .cbnocarry_{stem}","ori.b #$10,d1",f".cbnocarry_{stem}:","move.b d1,gb_f"]
-            if reg==6:body += ["moveq #0,d0","move.b d3,d0","moveq #0,d1","move.w gb_h,d1","jsr gb_write8"]
+            if reg==6:body += ["moveq #0,d0","move.b d3,d0","moveq #0,d1","move.w gb_h,d1","jsr gb_rmw_write8"]
             else:body += [f"move.b d3,{REGS[reg]}"]
     elif fam=="CP_A_D8":
         value=operand&255
@@ -538,10 +538,10 @@ def native_body(block):
                  f"{'subq' if fam=='DEC_R' else 'addq'}.b #1,d0",f"bne.s .nozero_{stem}","ori.b #$80,d1",f".nozero_{stem}:",f"move.b d0,{reg}","move.b d1,gb_f"]
     elif fam in ("INC_R","DEC_R"):
         half_expected=0 if fam=="DEC_R" else 15
-        body += ["moveq #0,d1","move.w gb_h,d1","jsr gb_read8","move.b d0,d3","moveq #$10,d1","and.b gb_f,d1",f"ori.b #${0x40 if fam=='DEC_R' else 0:02X},d1",
+        body += ["moveq #0,d1","move.w gb_h,d1","jsr gb_rmw_read8","move.b d0,d3","moveq #$10,d1","and.b gb_f,d1",f"ori.b #${0x40 if fam=='DEC_R' else 0:02X},d1",
                  "move.b d3,d2","andi.b #$0F,d2",f"cmpi.b #${half_expected:02X},d2",f"bne.s .nohalf_{stem}","ori.b #$20,d1",f".nohalf_{stem}:",
                  f"{'subq' if fam=='DEC_R' else 'addq'}.b #1,d3",f"bne.s .nozero_{stem}","ori.b #$80,d1",f".nozero_{stem}:","move.b d1,gb_f",
-                 "moveq #0,d0","move.b d3,d0","moveq #0,d1","move.w gb_h,d1","jsr gb_write8"]
+                 "moveq #0,d0","move.b d3,d0","moveq #0,d1","move.w gb_h,d1","jsr gb_rmw_write8"]
     elif fam=="LD_RR_A":
         pair=(op>>4)&3; addr=REGS16[2 if pair==3 else pair]
         body += ["moveq #0,d0","move.b gb_a,d0","moveq #0,d1",f"move.w {addr},d1","jsr gb_write8"]
