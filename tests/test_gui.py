@@ -41,6 +41,7 @@ class GuiHelpersTest(unittest.TestCase):
         try:
             self.assertTrue(window.auto_inputs.isChecked())
             self.assertFalse(window.show_fps.isChecked())
+            self.assertTrue(window.optimize_hram.isChecked())
             self.assertEqual(window.input_branches.value(),128)
             self.assertEqual(window.input_depth.value(),4)
             self.assertEqual(window.input_max_steps.value(),20_000_000)
@@ -75,6 +76,8 @@ class GuiHelpersTest(unittest.TestCase):
             )
             _, auto_arguments = compiler_command(resolved_rom, resolved_output, 1234, True, 9999)
             self.assertEqual(auto_arguments[-3:], ["--auto-steps", "--auto-max-steps", "9999"])
+            _, generic_arguments = compiler_command(resolved_rom,resolved_output,1234,optimize_hram=False)
+            self.assertEqual(generic_arguments[-1],"--no-hram-opt")
             _, input_arguments = compiler_command(resolved_rom, resolved_output, 1234, auto_inputs=True, input_max_branches=17, input_max_depth=3, input_max_steps=999)
             self.assertEqual(input_arguments[-7:], ["--auto-inputs", "--input-max-branches", "17", "--input-max-depth", "3", "--input-max-steps", "999"])
             _, sweep_arguments=compiler_command(resolved_rom,resolved_output,1234,

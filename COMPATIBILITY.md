@@ -1,5 +1,52 @@
 # GB2MD compatibility status
 
+## Direct constant HRAM access — 2026-11-15
+
+Known `$FF80..$FFFE` byte loads/stores now use direct 68000 memory access.
+Only E0/F0/EA/FA constant-address operations qualify. IE, I/O, indirect access,
+other memory windows, CPU flags and source timing retain their existing paths.
+Writes preserve the diagnostic counter. Mutable-code guards remain active,
+including when a program changes the address in an HRAM load instruction.
+`--no-hram-opt` and the GUI's Faster high RAM access checkbox allow comparison;
+layout/capacity retries retain the selected mode. CPU/peripheral runtime code
+was not changed.
+
+Observed results:
+
+- Original synthetic loops, equal 120-frame warmup/observation intervals:
+  read **1.1930x**, write **1.1993x**, absolute pair **1.3632x**, I/O control
+  **1.0000x** source-cycle throughput. These are not game FPS.
+- Preserved-coverage Tetris build: all 7,187 entries retained, 820 specialized
+  sites, ROM 3,188 bytes smaller. Disabling the feature reproduces the prior
+  checkpoint byte-for-byte. No fresh tracing or GUI coverage claim.
+- Matching-input active-play interval, Genesis frames 3,960–10,644:
+  **14.61 versus 13.95 simulated GB fps**, normalized to 60 Genesis frames/sec,
+  or about 4.7% more source-clock progress on this route. Both builds used the
+  optional FPS HUD. Different pieces and
+  phase alignment prevent a deterministic identical-state comparison. This
+  does not establish whole-game speed or a universal gain.
+- Real SDL input completed gameplay, movement, rotation, soft drops, score 32,
+  the next-piece preview, GAME OVER, name entry and entry into a second game.
+  Missing-block markers/counters stayed zero over 14,988 Genesis frames.
+  Second-game controls, line clears and physical hardware were not separately
+  retested. Stray border pixels/clipping remain. Active-play samples show
+  TAC=0 and IE=1, so a timer-enabled wait fallback does not explain this route.
+
+Focused module **4/4 PASS**, including eight native on/off scenarios for flags,
+clock samples, stack, write counts, DMA access and mutable code. Final fast
+suite: **177 PASS / 20 native-only skips** (197 methods). Selected external
+fixtures: **43/43 PASS in Python and native execution**, not Python-inferred
+native results. All **197 unit methods are covered and passing** across
+native-enabled batches of 99 and 98, with final HRAM/GUI checks refreshed after
+fixture and UI refinements. CPU/runtime code stayed unchanged. Offscreen GUI
+end-to-end checks built an original ROM in both modes and verified cancellation.
+
+Reproduce the original synthetic comparison with external tools:
+
+```sh
+GB2MD_VASM=/path/to/vasmm68k_mot python3 benchmark_hram.py --blastem /path/to/isolated-blastem-wrapper --out compat-builds/hram-comparison --frames 120
+```
+
 ## Guarded native register runs — 2026-11-15
 
 Native code generation now groups selected runs of three to eight immutable-ROM

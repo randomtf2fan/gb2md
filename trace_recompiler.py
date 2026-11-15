@@ -382,11 +382,20 @@ def parse_input_script(spec: str):
         events.append((start,start+duration,state))
     if not events and not memory_events:raise ValueError("input script contains no events")
     return {"name":spec,"events":events,"memory_events":memory_events}
-def native_body(block):
+def native_body(block,optimize_hram=True):
     """Return direct 68000 statements for semantics already safe to lower."""
     op,operand,pc,bank=block["opcode"],block["operand"],block["pc"],block["bank"]
     nextpc=(pc+len(bytes.fromhex(block["bytes"])))&0xFFFF; fam=block["family"]
     body=[]
+    # Constant HRAM loads/stores need no mapper, I/O or DMA-access dispatch.
+    # Keep normal instruction-cycle publication and write diagnostics; do not
+    # extend this to IE ($FFFF), I/O, indirect addresses or other RAM windows.
+    address=(0xFF00+(operand&255) if op in (0xE0,0xF0) else operand)
+    if optimize_hram and op in (0xE0,0xF0,0xEA,0xFA) and 0xFF80<=address<0xFFFF:
+        hram=f"gb_hram+${address-0xFF80:02X}"
+        body=(["addq.l #1,gb_write_count",f"move.b gb_a,{hram}"] if op in (0xE0,0xEA)
+              else [f"move.b {hram},gb_a"])
+        return body+[f"move.w #${nextpc:04X},gb_pc","jmp gb_dispatch"]
     stem=f"B{bank:03X}_{pc:04X}{block.get('variant_suffix','')}"
     taken_cost=instruction_cycles(op,operand,True)-block.get('bus_fetch_cycles',0)
     def push_word(value_setup):
@@ -1032,7 +1041,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
     emit_native_blocks(blocks,out)
     return blocks
 
-def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,include_block_table=True,optimize_pure_chains=True,max_fused_regions=128):
+def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,include_block_table=True,optimize_pure_chains=True,max_fused_regions=128,optimize_hram=True):
     """Emit validated block metadata without repeating reference discovery."""
     if max_hot_chains is not None and max_hot_chains<0:raise ValueError('negative hot chain limit')
     if max_fused_regions<0:raise ValueError('negative fused region limit')
@@ -1049,6 +1058,7 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
     used=sorted({b["family"] for b in blocks if not b["native_lowered"]})
     label=lambda b:f"L_gb_B{b['bank']:03X}_{b['pc']:04X}"
     block_by_key={(b["bank"],b["pc"]):b for b in blocks}
+    lower=lambda block:native_body(block,optimize_hram=optimize_hram)
     chain_targets=set();incoming_costs=collections.defaultdict(set);source_edges=collections.defaultdict(set)
     def pure_cycles(block,body):
         if block.get('bus_fetch_cycles'):return None
@@ -1098,7 +1108,7 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
             variants.append({**block,"opcode":raw[0],"operand":raw[1] if len(raw)==2 else (raw[1]|raw[2]<<8 if len(raw)==3 else 0),"bytes":raw_hex,"family":family(raw[0]),"observed_variants":[]})
         for index,variant in enumerate(variants):
             if len(variants)>1:variant={**variant,"variant_suffix":f"_V{index}"}
-            body=native_body(variant)
+            body=lower(variant)
             if body is not None:
                 threaded_bodies[(variant['bank'],variant['pc'],variant['bytes'])]=thread_static_dispatch(variant,body)
     hot_candidates=sorted((key for key in chain_targets if block_by_key[key]['hits']>0),
@@ -1117,7 +1127,7 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
         for _ in range(8):
             block=block_by_key.get(key)
             if block is None or block.get('observed_variants') or not 0<=block['pc']<0x8000:break
-            body=native_body(block);cycles=pure_cycles(block,body) if body is not None else None
+            body=lower(block);cycles=pure_cycles(block,body) if body is not None else None
             if cycles is None:break
             target=block['pc']+len(bytes.fromhex(block['bytes']))
             # Do not infer a bank across a logical cartridge window edge.
@@ -1131,7 +1141,7 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
             hits=block_by_key[start]['hits']
             # Ten bytes per statement conservatively bounds the added native
             # code, including local branches; labels need no storage.
-            estimate=96+sum(10*len(native_body(block_by_key[item])[:-2]) for item in sequence)
+            estimate=96+sum(10*len(lower(block_by_key[item])[:-2]) for item in sequence)
             candidates.append((-(hits*(len(sequence)-1)),start,sequence,key,cost,estimate))
     fused_regions={};claimed=set();fusion_bytes=0
     for _,start,sequence,target,cost,estimate in sorted(candidates):
@@ -1211,7 +1221,7 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
         for key in sequence:
             # Unique local labels are needed for arithmetic/flag branches in
             # the duplicated bodies. Every GB flag update is retained.
-            body=native_body({**block_by_key[key],'variant_suffix':f'_FUSED_{stem}'})
+            body=lower({**block_by_key[key],'variant_suffix':f'_FUSED_{stem}'})
             lines += ['\t'+line for line in body[:-2]]
         lines += [f"\taddi.w #{cost},d7",f"\tjmp {label(block_by_key[target])}",""]
     # Hot constant successors above jump through these shared chain stubs.
@@ -1306,6 +1316,8 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
         "hot_chain_targets":len(chain_targets)-len(compact_targets),
         "hot_chain_limit":max_hot_chains,
         "optimize_pure_chains":optimize_pure_chains,
+        "optimize_hram":optimize_hram,
+        "direct_hram_sites":sum(any('gb_hram+$' in line for line in body) for body in threaded_bodies.values()),
         "constant_cycle_chain_targets":len(constant_costs),
         "elided_cycle_stores":elided_cycle_stores,
         "fused_register_regions":len(fused_regions),

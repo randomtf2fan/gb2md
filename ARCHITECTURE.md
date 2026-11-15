@@ -964,3 +964,38 @@ It reproduces wrong INC/DEC and CB data/flags while a BIT control matches.
 WRAM, OAM and IE. The reference CPU and peripheral algorithms are unchanged.
 This does not fix every memory/bus interaction, including broader CPU access
 restrictions and ordinary-memory writes racing DMA; full PPU timing is open.
+
+## Constant HRAM load/store lowering (2026-11-15)
+
+`native_body(block, optimize_hram=True)` lowers the four constant-address
+loads/stores (`LDH (a8),A`, `LDH A,(a8)`, `LD (a16),A`, `LD A,(a16)`) directly
+when their address lies in `$FF80..$FFFE`. For example, `F0 80` becomes
+`move.b gb_hram+$00,gb_a`. A store also emits the same
+`addq.l #1,gb_write_count` as the generic write service. The actual Game Boy
+HRAM storage remains shared with indirect accesses and code-variant guards.
+
+This removes host address classification and a service call, without changing
+source instruction costs, flags, polling analysis, interrupt handling or DMA.
+The generic HRAM handlers do not synchronize peripherals, so there is no lost
+timing barrier. These instructions remain classified as memory operations:
+removing their helper call does not make them eligible for register fusion.
+IE at `$FFFF`, I/O below `$FF80`, other memory windows and all indirect
+addresses retain their original handlers. HRAM remains accessible during DMA.
+This pass does not fix existing ordinary-memory DMA races or bus restrictions.
+
+`emit_native_blocks()` and `build()` accept the independent `optimize_hram`
+keyword. `--no-hram-opt` selects the generic path; `--no-chain-opt` controls
+register chains separately. Capacity retries carry both selections. The GUI's
+**Faster high RAM access** checkbox forwards the disabled mode through
+`compiler_command()`; restart and recompile after updating. Reports record
+`optimize_hram` and `direct_hram_sites` (instruction-variant sites, not unique
+addresses). Old output images do not update automatically.
+
+`tests/test_hram_lowering.py` uses original programs for byte-range boundaries,
+flags, clock samples, stack preservation, write counts, DMA-time HRAM access,
+mutable immediates and a mutable HRAM load address. Existing observed-byte
+variant checks choose the correct specialized native body; unknown variants
+still trap. `benchmark_hram.py` generates original read/write/absolute and I/O
+control loops, confirms identical discovered coverage in both modes, and
+compares source-cycle throughput over equal Genesis-frame intervals. Its
+numbers are synthetic workload measurements, not game-speed guarantees.

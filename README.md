@@ -92,11 +92,11 @@ all obligations are reviewed. BlastEm is optional and likewise treated as an
 external local test dependency.
 
 The `test_roms/` collection and all input `.gb`/`.gbc` files are local fixtures
-and are ignored by the repository safety rules. The 174 focused unit tests use
+and are ignored by the repository safety rules. The 177 focused unit tests use
 synthetic data and do not require commercial ROMs. Compatibility-suite runs
 require the user to supply the relevant test ROMs separately.
 
-Nineteen additional native integration methods use original diagnostic ROMs
+Twenty additional native integration methods use original diagnostic ROMs
 generated from test source: controller rows, static dispatch discovery, compact
 scheduler interrupt/mapper paths, missing dispatch slots/pages/banks, and
 far-call bank restoration, indexed record/RAM callbacks, preserving indexed calls,
@@ -355,3 +355,11 @@ recompile to add it. The rate is sampled over50 PAL or60 NTSC Genesis VBlanks,
 not the emulator's display FPS or a count of unique rendered images. It uses
 nominal hardware time even during emulator fast-forward. See COMPATIBILITY.md
 for measurement scope and tested overhead.
+
+Known constant Game Boy high-RAM loads/stores now use direct native memory
+access. Source timing, flags, write counters and mutable-code guards remain;
+I/O, IE and indirect accesses keep their original paths. The GUI's **Faster
+high RAM access** checkbox enables this by default. Disable it, or use
+`--no-hram-opt`, for a compatibility comparison. Restart the GUI and rebuild
+to use the update. `benchmark_hram.py` provides original-code A/B workloads;
+see [COMPATIBILITY.md](COMPATIBILITY.md) for scoped results and limitations.
