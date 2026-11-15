@@ -302,6 +302,15 @@ miscompiled. It does not copy the input ROM into output artifacts.
 - Pokémon Red and the tested Bad Apple demo do not yet produce playable native
   results. See [COMPATIBILITY.md](COMPATIBILITY.md) for measured evidence.
 
+Native scheduler bookkeeping avoids redundant interrupt-deadline work and
+register saves while preserving the existing 200-T-cycle cap and event
+semantics. This is enabled for new CLI and GUI builds; existing ROMs require
+recompilation. See [COMPATIBILITY.md](COMPATIBILITY.md) for measured results.
+To compare against an older runtime using original synthetic programs, run
+`python3 benchmark_scheduler.py --reference-runtime /path/to/old/runtime_68000.s
+--out compat-builds/scheduler-comparison` with external vasm and BlastEm
+configured. Results measure simulated source-clock throughput, not host FPS.
+
 ## Sources
 
 - Sega’s [Genesis Software Manual](https://fabiensanglard.net/another_world_polygons_Genesis/GenesisSoftwareManual.pdf) documents the 68000/Z80/VDP address spaces.

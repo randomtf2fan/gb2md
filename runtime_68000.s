@@ -996,7 +996,9 @@ gb_add_idle_cycles:
 ; Variable mode-3 stalls, LCD startup and DMG STAT-write glitch remain open.
 ; Preserve scheduler/write operands; STAT requests on the OR-line rising edge.
 gb_stat_sync:
-	movem.l d0-d3,-(sp)
+	; Only two temporaries are needed. D2/D3 may hold a pending bus-write
+	; value/address in callers and remain untouched, as with the old save set.
+	movem.l d0-d1,-(sp)
 	moveq #0,d0
 	btst #7,gb_io+$40
 	beq.s .stat_mode_ready
@@ -1015,33 +1017,43 @@ gb_stat_sync:
 	move.b gb_io+$41,d1
 	andi.b #$78,d1
 	or.b d0,d1
-	move.b gb_io+$44,d2
-	cmp.b gb_io+$45,d2
+	moveq #0,d0
+	move.b gb_io+$44,d0
+	cmp.b gb_io+$45,d0
 	bne.s .stat_no_coincidence
 	ori.b #4,d1
 .stat_no_coincidence:
 	move.b d1,gb_io+$41
-	moveq #0,d3
+	; With no STAT source enabled, mode/coincidence still update but the
+	; combined interrupt line is necessarily low. Never clear a pending IF.
+	cmpi.b #8,d1
+	blo.s .stat_line_low
 	btst #7,gb_io+$40
-	beq.s .stat_line_ready
+	beq.s .stat_line_low
 	btst #2,d1
 	beq.s .stat_mode_source
 	btst #6,d1
 	bne.s .stat_line_high
 .stat_mode_source:
+	move.b d1,d0
+	andi.w #3,d0
 	cmpi.b #3,d0
-	beq.s .stat_line_ready
+	beq.s .stat_line_low
 	addq.w #3,d0
 	btst d0,d1
-	beq.s .stat_line_ready
+	beq.s .stat_line_low
 .stat_line_high:
-	moveq #1,d3
 	tst.b gb_stat_line
-	bne.s .stat_line_ready
+	bne.s .stat_high_ready
 	bset #1,gb_io+$0F
+.stat_high_ready:
+	moveq #1,d0
+	bra.s .stat_line_ready
+.stat_line_low:
+	moveq #0,d0
 .stat_line_ready:
-	move.b d3,gb_stat_line
-	movem.l (sp)+,d0-d3
+	move.b d0,gb_stat_line
+	movem.l (sp)+,d0-d1
 	rts
 
 ; RMW memory operations read one M-cycle before their final write. Only
@@ -1427,7 +1439,22 @@ gb_timer_periods:
 ; need no extra per-instruction checks. gb_tick subtracts the credit once.
 ; Refresh only with IME and at least one IE bit enabled, after real ticks.
 gb_refresh_batch_bias:
-	movem.l d0-d6/a0-a1,-(sp)
+	; A VBlank-only configuration cannot have an enabled event within 200T
+	; outside LY143 unless VBlank is already pending. Avoid the general
+	; timer/STAT calculation and register save in that common case.
+	cmpi.b #1,gb_ie
+	bne.s .batch_general
+	btst #0,gb_io+$0F
+	bne.s .batch_general
+	cmpi.b #143,gb_io+$44
+	beq.s .batch_general
+	sub.w d7,d7
+	clr.w gb_batch_bias
+	rts
+.batch_general:
+	; D5/D6/A1 are never touched by this helper; preserve every register
+	; actually used, without saving and restoring those three on every tick.
+	movem.l d0-d4/a0,-(sp)
 	move.l #200,d0
 	move.b gb_io+$0F,d1
 	and.b gb_ie,d1
@@ -1508,7 +1535,7 @@ gb_refresh_batch_bias:
 	move.w #200,d7
 	sub.w d0,d7
 	move.w d7,gb_batch_bias
-	movem.l (sp)+,d0-d6/a0-a1
+	movem.l (sp)+,d0-d4/a0
 	rts
 
 ; Advance OAM DMA by d6.w T-cycles. Startup/restart edges are processed one

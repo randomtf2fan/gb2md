@@ -1,5 +1,67 @@
 # GB2MD compatibility status
 
+## Native scheduler bookkeeping — 2026-11-15
+
+Native profiling identified repeated STAT and interrupt-deadline bookkeeping
+as a useful target. In one falling-piece route, rendering occupied about 2.1%
+of the sampled interval and `gb_tick` about 32.4%, including its callees.
+These are separate samples, not whole-game averages or additive percentages.
+Compact shared-chain dispatch was rare in this route, so its layout was kept.
+
+The runtime now saves fewer registers in STAT/deadline helpers and avoids
+the general deadline calculation when raw IE=1, VBlank IF is clear and LY is
+not 143. All other configurations retain the general calculation. STAT mode,
+LY/LYC, combined-line edges, pending IF, the 200-T-cycle cap and source clocks
+retain their existing semantics. No game checks, timing multipliers or cached
+peripheral state were added. New CLI and GUI builds both use this runtime.
+
+Measured results:
+
+- Separate native samples of 128 calls each: deadline-helper clock cost
+  **68.2% lower**, STAT **23.6% lower**, inclusive `gb_tick` **13.4% lower**.
+  Sampling states differ; these are helper measurements, not game FPS.
+- Original register-loop A/B with identical lowering: masked interrupts
+  **1.0087x**, VBlank-only **1.0609x**, mixed interrupts **1.0015x** source-cycle
+  throughput. Fixed 180-Genesis-frame warmup/observation, not host FPS.
+- Same-input active-play interval, Genesis frames 3,960–10,644:
+  Tetris **15.59 versus 14.61 simulated GB fps**, normalized to 60 Genesis
+  frames/sec (**about 6.8% more clock progress**). Different pieces and phase
+  alignment prevent an identical-state comparison. This is still below full
+  speed and does not establish a universal gain.
+- Actual SDL input completed movement, rotation, soft drops, visible NEXT,
+  score 44, GAME OVER, name entry and entry into a second game. All 49 sampled
+  states over 14,988 Genesis frames had zero missing/unimplemented markers.
+  Line clears, second-game controls and physical hardware were not separately
+  rerun; clipping and stray border pixels remain. The preserved 7,187-entry
+  profile was reused; this is not a fresh GUI trace-coverage validation.
+
+The old and new runtimes both pass **10,140 native state vectors**: 7,680
+STAT cases and 2,460 deadline cases, including register-preservation checks.
+Fast suite: **178 PASS / 21 native-only skips** (199 methods).
+All **199 unit methods PASS** with native tests enabled (100 + 99 batches).
+One first-attempt BlastEm host JIT displacement error is retained in the private
+logs; the affected method passed unchanged on its single-method retry.
+Selected external fixtures: **43/43 PASS in Python and native execution**
+(14 instruction-timing, 13 timer plus reg_f, five control-flow and ten additional
+interrupt/memory-timing cases). This is a selected regression set, not a claim
+that every available fixture or game passes. The public benchmark reproduced
+all six private A/B source-cycle deltas exactly.
+
+Reproduce the original synthetic comparison (external tools required):
+
+```sh
+git show 90a61cc:runtime_68000.s > /tmp/gb2md-runtime-before-scheduler.s
+GB2MD_VASM=/path/to/vasmm68k_mot GB2MD_BLASTEM=/path/to/blastem \
+  python3 benchmark_scheduler.py \
+  --reference-runtime /tmp/gb2md-runtime-before-scheduler.s \
+  --out compat-builds/scheduler-comparison
+```
+
+Use a fresh output directory. JSON includes runtime hashes, matched coverage,
+source-cycle deltas and throughput ratios. The benchmark generates only
+original diagnostic ROMs. Automated desktop testing should use an isolated
+display wrapper in `GB2MD_BLASTEM`.
+
 ## Direct constant HRAM access — 2026-11-15
 
 Known `$FF80..$FFFE` byte loads/stores now use direct 68000 memory access.

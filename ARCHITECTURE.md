@@ -999,3 +999,42 @@ still trap. `benchmark_hram.py` generates original read/write/absolute and I/O
 control loops, confirms identical discovered coverage in both modes, and
 compares source-cycle throughput over equal Genesis-frame intervals. Its
 numbers are synthetic workload measurements, not game-speed guarantees.
+
+## Native scheduler bookkeeping (2026-11-15)
+
+Profiling uses BlastEm's emulated clock at helper entry/return, rather than
+its display FPS or host wall time. On one Tetris falling-piece route,
+`gb_render_frame` occupied about 2.1% of the sampled interval (no background
+refreshes), while `gb_tick` occupied 32.4%, including its callees. Separate
+samples of nested `gb_stat_sync` and `gb_refresh_batch_bias` were about 6%
+each. These nested measurements must not be added together, and this route
+does not represent every game, line clearing, scrolling or video playback.
+Compact shared chains were rare in this sample; changing their layout was
+not justified by the measurements.
+
+`gb_stat_sync` now needs D0/D1 instead of D0–D3. It still updates mode and
+LY/LYC coincidence on every call, even with STAT interrupts disabled. With no
+STAT interrupt source enabled, it sets the combined line low directly, while
+preserving any pending IF request. Enabled-source paths retain the same
+OR-line rising-edge behavior. This changes bookkeeping cost, not PPU timing.
+
+`gb_refresh_batch_bias` avoids its general calculation only when raw IE is
+exactly 1, VBlank IF is clear, and LY is not 143. In that configuration there
+is no enabled event within the existing 200-T-cycle cap, so the correct
+credit is zero. LY143 and pending VBlank still use the general path. Other
+interrupt configurations retain the old deadline calculation, with six
+registers saved instead of nine; the other three registers are untouched.
+No cache, clock multiplier, new runtime state or game-specific rule is used.
+
+`tests/test_scheduler_bookkeeping.py` checks 7,680 STAT state vectors against
+`Memory._update_stat` and 2,460 capped deadline vectors, including LY143
+boundaries, mixed interrupt masks, timer reloads and upper-D7 preservation.
+Its native harness checks state and register contracts against both helpers.
+The prior runtime and the optimized runtime both pass these matrices.
+
+`benchmark_scheduler.py` generates original register loops with masked,
+VBlank-only and mixed interrupts. Supply an earlier `runtime_68000.s` through
+`--reference-runtime`; both builds use identical current lowering and their
+coverage must match. External vasm and BlastEm are required. The JSON records
+runtime hashes and source-cycle progress over fixed Genesis-frame intervals.
+A throughput ratio describes these synthetic loops, not commercial-game FPS.
