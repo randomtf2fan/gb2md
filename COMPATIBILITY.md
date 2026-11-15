@@ -42,8 +42,9 @@ Validation:
 
 These changes do not establish full Game Boy hardware compatibility or speed.
 Ordinary-memory accesses racing DMA, bus restrictions, native IME0 HALT-bug
-handling, full PPU behavior and wider mapper support remain open. No fresh
-commercial gameplay or performance measurement was made for this RMW change.
+handling, full PPU behavior and wider mapper support remain open. The focused
+RMW validation initially made no commercial gameplay or performance claim;
+the separately scoped follow-up is recorded below.
 The original loop overhead measurements in the preceding interrupt milestone
 apply only to that change. Protected checkpoints and external fixtures intact.
 
@@ -57,6 +58,32 @@ python3 run_compat_tests.py test_roms/blargg/mem_timing/individual/03-modify_tim
 All native tests run on the isolated virtual display. The GUI needs no new
 setting; restart and rebuild to use the sibling compiler/runtime updates.
 
+
+## Native gameplay regression after bus-phase fixes — 2026-11-15
+
+A fresh private Tetris image built with source `a6f776e` and the preserved
+7,187-entry trace profile reached A-Type gameplay, accepted movement, rotation
+and soft drops, displayed the next-piece preview, and scored 47. Repeated
+controller inputs filled the board and reached `GAME OVER / PLEASE TRY AGAIN`.
+Start returned to the level/top-score screen. Missing-block marker and counter
+remained zero throughout 14,940 Genesis frames. Testing used actual SDL input
+on an isolated virtual display, with no guest-memory writes or board pokes.
+
+This reused validated coverage; it does **not** establish fresh automatic
+coverage or a GUI build result. Starting a second game remains unverified:
+another Start press left the level/top-score screen visible while simulation
+continued. Score-name entry may require other input; its cause was not
+established. Line clearing and physical hardware were not retested here.
+Stray pixels near the viewport edge remain visible in some captures.
+
+During an active-play interval of 8,412 Genesis frames, the source clock
+advanced 135,950,848 T-cycles and the renderer count advanced 1,936 frames:
+**13.81 simulated GB fps**, normalized to 60 Genesis frames/second. This is
+source-clock progress, not unique-picture or host wall-clock FPS, and is not
+a controlled speed comparison with the older builds. Performance remains slow.
+The post-resumption fast suite passed 170 tests with 18 native-only skips
+(188 discovered); the earlier full 188/188 native-enabled and selected 43/43
+both-backend results above remain the completed core regression baseline.
 
 ## Event-aware native interrupt batching — 2026-11-15
 
