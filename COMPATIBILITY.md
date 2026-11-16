@@ -34,12 +34,28 @@ Validation:
   native range checks/holes, high/odd addresses, page edges, IRQs and mappers.
 - A preserved-coverage Tetris rebuild remains byte-identical to ca61322a.
 
-At this validation point, actual native fresh boot, Oak/lab conversations and
-Charmander inspection/selection are verified with zero missing-block markers.
-The inspection picture renders. Rival battle and attack exchanges are still
-being tested; Python-only progress is not counted as native gameplay success.
-Speed remains limited; physical hardware and full-game compatibility are not
-verified by these runs. Commercial artifacts and coverage profiles stay private.
+Actual native fresh boot now reaches complete Oak/lab conversations, starter
+acquisition and the rival battle. Charmander's inspection picture and both
+battle Pokémon render. Real SDL inputs selected Fight and Scratch: the enemy
+HP bar decreased, Charmander changed from 19/19 to 16/19, and the Fight menu
+returned. The next move menu showed 34/35PP, confirming the first move was used.
+
+The second exchange hit a missing entry during enemy Tail Whip. There were 231
+clean observations before this trap at 291,492 Genesis frames. The requested
+entry is absent from the compiled graph; it was not removed by table bounding.
+Python reaches the same missing routine and continues. Its lookup scales A
+before loading the table base, whereas the current inline-table recognizer
+expects scaling after that load. A small original ROM reproduces this coverage
+gap without commercial data. Extending general indexed-flow discovery with
+proper bank/bounds/false-positive tests is the next correction; no game-specific
+runtime replacement or interpreter fallback was added.
+
+This verifies one battle exchange, not battle completion or complete gameplay.
+The first attack observation window averaged about 4.52 simulated GB frames/s
+when normalized to 60 Genesis frames/s; it includes waits and is not a controlled
+before/after benchmark. Speed remains limited. Fresh automatic GUI discovery,
+alternate choices, saves, physical hardware and full rendering correctness
+remain unverified. Commercial artifacts and coverage profiles stay private.
 
 
 ## Incremental native Pokémon route: Oak and laboratory — 2026-11-16

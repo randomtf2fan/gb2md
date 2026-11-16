@@ -324,8 +324,9 @@ miscompiled. It does not copy the input ROM into output artifacts.
   candidate leaves the former timer-active stalls, renders World 1-1, advances
   its timer, and executes movement, jump, and collision/death paths; extended
   gameplay and exact pacing are not verified.
-- Pokémon Red has verified intro, house interactions and a transition outdoors;
-  full gameplay remains unverified. The tested Bad Apple demo remains incomplete.
+- Pokémon Red has verified starter acquisition and one rival battle exchange
+  on an imported-coverage route; a later Tail Whip effect still traps. Full
+  gameplay and normal GUI coverage remain unverified. Bad Apple remains incomplete.
   See [COMPATIBILITY.md](COMPATIBILITY.md) for measured evidence.
 
 Native scheduler bookkeeping avoids redundant interrupt-deadline work and
