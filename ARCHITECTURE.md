@@ -1067,3 +1067,52 @@ observed entries and newly contributed identities). Imported zero-hit static
 candidates are not reported as dynamic execution. Existing hit weights guide
 layout but do not become hardcoded inputs or runtime decisions. The build API
 and CLI expose the optional feature; the GUI continues to run fresh tracing.
+
+## Branch-separated bank calls and inline BC callbacks (2026-11-16)
+
+`_constant_far_setup` follows a bounded path that assigns B (bank) and HL
+(target), allowing NOP and unconditional JR/JP between assignments. It stops
+at a candidate CALL/JP after both constants are known. Conditional paths,
+unknown effects, cycles, ROM-window crossings and limits (16 instructions,
+128-byte span) fail closed. `constant_far_call_targets` still verifies the
+entire existing bank-save/select/call/restore trampoline before adding roots.
+This recognizes shared argument-setup blocks without assuming a bank change
+from an arbitrary call or replacing any source instructions.
+
+`inline_bc_call_table` recognizes an explicit zero high index byte, a ROM
+word lookup through BC into HL, then a short sequence of HL/bank-preserving
+argument loads and an explicit PUSH/JP synthetic call. Its literal return
+must point immediately after the jump to a recognized return epilogue. It
+adds bounded aligned pointer candidates and the return entry through normal
+closure; it does not infer every possible unknown byte offset. Table bounds,
+physical bank mapping, a minimum of two pointers, a 128-entry cap and the
+forward-code boundary constrain scanning. Actual execution still runs the
+original index arithmetic, lookup, stack operations and selected callback.
+Trace/build reports expose `inline_bc_call_targets`, `inline_bc_call_returns`
+and `inline_bc_call_tables` separately.
+
+## Capacity fallback for dispatch tables (2026-11-16)
+
+Ordinary fitting images retain the existing 32-bit bank/page/leaf tables.
+If a paged image exceeds 4 MiB, `build` first omits the unused duplicate block
+catalog when permitted, then tries `emit_native_blocks(dispatch_format="packed")`
+before reducing inline scheduler quotas. Later retries retain the selected
+format and optimization settings. Every executable block and diagnostic hole
+is retained; the final 4 MiB cartridge limit is still enforced.
+
+Only leaf pointers shrink from four bytes to three. Bank and page directories
+remain aligned 32-bit pointers. Leaf slot `PC & 255` is multiplied by three;
+three byte reads assemble a zero-extended 24-bit native address. Word/long
+reads at these slots would bus-error on odd addresses on a real 68000. The
+lookup uses scratch D0/D1/A0 and leaves the scheduler's D7 untouched. The
+builder's image limit ensures native pointers fit in 24 bits.
+
+The format costs extra pointer-unpacking work, so it is a capacity fallback,
+not a universal speed optimization. Saving 256 bytes per populated leaf page
+plus the empty page can also preserve more fast inline scheduler entries.
+Reports identify `bank_page_table_24`, `dispatch_leaf_entry_bytes=3`, exact
+metadata bytes and the format of every layout attempt. Explicit `paged` and
+`packed` emitter options permit controlled testing. Original native tests
+exercise addresses above 0x123456, odd slots, page boundaries, missing entries,
+IRQ flow, mapper changes and MBC5 bank zero. A preserved-coverage Tetris rebuild
+remains byte-identical to its prior normal-table checkpoint.

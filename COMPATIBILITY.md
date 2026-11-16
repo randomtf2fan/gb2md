@@ -1,5 +1,58 @@
 # GB2MD compatibility status
 
+## House exit, indirect calls and ROM capacity — 2026-11-16
+
+The prior Pokémon candidate froze during movement toward the front door:
+native execution requested an untranslated banked routine. The reference
+showed constant HL and B arguments separated by an unconditional branch;
+inside that routine, a BC-indexed ROM word table made a synthetic return call.
+Both cases were absent from the old static recognizers. These are general
+control-flow patterns, not evidence of a mapper defect on this route.
+
+`_constant_far_setup` now follows bounded unconditional setup paths while
+retaining the exact trampoline proof. `inline_bc_call_table` discovers bounded
+aligned callback candidates and their literal return. Unknown effects,
+conditional setup paths, bank/window ambiguity and analysis limits stop the
+recognizers. Original source arithmetic, lookups and calls still execute.
+No game title, cartridge hash or game address is used as a compatibility rule.
+
+The extra code exceeded 4 MiB even with shared scheduler stubs. A capacity-only
+fallback packs paged leaf addresses into three bytes, retaining every block,
+all missing-entry traps and the selected optimization flags. Bank/page
+directories remain 32-bit. Three byte reads avoid odd-address word accesses
+on a real 68000. Fitting images keep the original four-byte leaves. Pointer
+unpacking adds work, so this is not a universal performance claim.
+
+Verified results:
+
+- Fresh native boot, preset naming, bedroom movement, stairs, Mother's complete
+  conversation and house exit to Pallet Town. All 121 sampled states through
+  120,912 Genesis frames had zero missing/unimplemented markers. Controls were
+  actual SDL inputs; debugger queries were read-only.
+- All 38,082 prior entries retained; 39,460 total entries. All 36 newly executed
+  reference entries on the exit route were found without importing that new
+  reference trace. This build still reused the earlier coverage profile; fresh
+  automatic GUI discovery was not retested or established.
+- Native image: 4,173,864 bytes. Packed dispatch metadata: 478,080 bytes,
+  saving 149,760 bytes against wide leaves for the same graph. The builder
+  retains 947 fast scheduler entries; no executable code was dropped.
+- **219/219 native-enabled test-method results PASS**. Fast suite:
+  **191 PASS / 28 native-only skips**, private and public copies. New original
+  fixtures cover split argument setup, physical banks, false-positive guards,
+  synthetic returns, high native addresses, odd slots, holes and capacity retries.
+- **43/43 selected external fixtures PASS in fresh Python and forced-packed
+  native runs**, including instruction timing, timers/reg_f, interrupt control
+  and memory timing. The outer protocol launcher reported SIGTERM after all
+  passing records were saved; individual native protocol assertions passed.
+- Preserved-coverage Tetris rebuild is byte-identical to checkpoint ca61322a.
+  CPU, memory, PPU, lowering and Genesis runtime sources were unchanged.
+
+Outdoor walking, Oak, lab/starter selection, battles, saves and physical
+hardware were not yet verified in this milestone. A reference continuation
+heading north identified further inline-script coverage needed for Oak's event;
+that discovery is not a native success. Graphics and speed limitations remain.
+Commercial ROMs, profiles, generated code and checkpoints remain private.
+
 ## Incremental coverage and dialogue investigation — 2026-11-16
 
 The older native Pokémon Red checkpoint reached downstairs but trapped on

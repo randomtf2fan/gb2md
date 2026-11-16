@@ -323,8 +323,9 @@ miscompiled. It does not copy the input ROM into output artifacts.
   candidate leaves the former timer-active stalls, renders World 1-1, advances
   its timer, and executes movement, jump, and collision/death paths; extended
   gameplay and exact pacing are not verified.
-- Pokémon Red and the tested Bad Apple demo do not yet produce playable native
-  results. See [COMPATIBILITY.md](COMPATIBILITY.md) for measured evidence.
+- Pokémon Red has verified intro, house interactions and a transition outdoors;
+  full gameplay remains unverified. The tested Bad Apple demo remains incomplete.
+  See [COMPATIBILITY.md](COMPATIBILITY.md) for measured evidence.
 
 Native scheduler bookkeeping avoids redundant interrupt-deadline work and
 register saves while preserving the existing 200-T-cycle cap and event
@@ -334,6 +335,12 @@ To compare against an older runtime using original synthetic programs, run
 `python3 benchmark_scheduler.py --reference-runtime /path/to/old/runtime_68000.s
 --out compat-builds/scheduler-comparison` with external vasm and BlastEm
 configured. Results measure simulated source-clock throughput, not host FPS.
+
+Large paged images can use a capacity fallback that stores native leaf
+addresses in three bytes. The builder tries this automatically after optional
+catalog omission and before reducing inline scheduler quotas; all code and
+missing-block diagnostics remain present. Fitting images keep their existing
+four-byte leaf format. The final cartridge window remains limited to 4 MiB.
 
 ## Sources
 

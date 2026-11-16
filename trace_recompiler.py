@@ -161,24 +161,54 @@ def constant_bank_call_targets(rom,pc):
     site=constant_bank_call_site(rom,pc)
     return site[1] if site is not None else []
 
+def _constant_far_setup(rom,bank,pc):
+    """Prove B/HL setup along a short, unconditional, bank-preserving path.
+
+    Only immediate loads, NOP and direct branches are accepted. Unknown side
+    effects, conditional paths, cycles, window crossings and budgets fail closed.
+    A CALL/JP after both constants is a candidate trampoline, never an assumed
+    bank switch: the caller must separately verify the entire helper body.
+    """
+    start=pc;low=0 if pc<0x4000 else 0x4000;high=low+0x4000
+    value=target=None;visited=set()
+    for _ in range(16):
+        if pc in visited or not low<=pc<high or abs(pc-start)>128:return None
+        visited.add(pc)
+        offset=pc if pc<0x4000 else bank*0x4000+pc-0x4000
+        if not 0<=offset<len(rom):return None
+        op=rom[offset];size=instruction_length(op)
+        if pc+size>high or offset+size>len(rom):return None
+        raw=rom[offset:offset+size]
+        if len(visited)==1 and op not in (0x06,0x21):return None
+        if op==0x06:value=raw[1]
+        elif op==0x21:target=raw[1]|raw[2]<<8
+        elif op==0x18:
+            pc=(pc+2+(raw[1]-256 if raw[1]&128 else raw[1]))&0xFFFF
+            continue
+        elif op in (0xCD,0xC3):
+            destination=raw[1]|raw[2]<<8
+            if value is not None and target is not None:return value,target,destination
+            if op==0xCD:return None
+            pc=destination;continue
+        elif op!=0x00:return None
+        pc+=size
+    return None
+
 def constant_far_call_targets(rom,bank,pc,diagnostics=None):
     """Resolve constant B=bank / HL=target calls through a verified trampoline.
 
-    Accept either setup order and CALL/JP, including bounded fixed-ROM aliases.
+    Accept either setup order, bounded unconditional setup branches and CALL/JP,
+    including bounded fixed-ROM aliases.
     The helper must save the current bank, select B, push its own return
     trampoline, JP(HL), then restore the saved bank and RET. No source-game
     addresses, assumed caller-bank invariants or replacement CPU semantics.
     """
     if len(rom)<=0x147 or not 0<=pc<0x8000:return []
-    if pc+8>(0x4000 if pc<0x4000 else 0x8000):return []
-    offset=pc if pc<0x4000 else bank*0x4000+pc-0x4000
-    raw=rom[offset:offset+8]
-    if len(raw)!=8 or raw[5] not in (0xCD,0xC3):return []
-    if raw[0]==0x06 and raw[2]==0x21:value,target=raw[1],raw[3]|raw[4]<<8
-    elif raw[0]==0x21 and raw[3]==0x06:value,target=raw[4],raw[1]|raw[2]<<8
-    else:return []
+    setup=_constant_far_setup(rom,bank,pc)
+    if setup is None:return []
+    value,target,helper=setup
     if not 0x100<=target<0x8000:return []
-    helper=raw[6]|raw[7]<<8;seen=set()
+    seen=set()
     for _ in range(4):
         if helper in seen or not 0<=helper<0x4000:return []
         seen.add(helper)
@@ -301,6 +331,46 @@ def hl_dispatch_table(rom,bank,pc,diagnostics=None):
             if op==0xC3:return None
             if not any(read(helper,len(s))==s for s in signatures):return None
             resolved=True;cursor+=3
+        else:return None
+    return None
+
+def inline_bc_call_table(rom,bank,pc,diagnostics=None):
+    """Recognize a byte-offset BC lookup followed by a synthetic return call.
+
+    B is explicitly cleared before the ROM word lookup. Only HL-preserving
+    argument loads may follow it. Aligned table words are coverage candidates,
+    not a claim that every possible byte offset or future path was discovered.
+    """
+    if len(rom)<=0x147 or not 0<=pc<0x8000:return None
+    high=0x4000 if pc<0x4000 else 0x8000
+    def read(address,size):
+        if not pc<=address or address+size>high:return None
+        offset=address if address<0x4000 else bank*0x4000+address-0x4000
+        return rom[offset:offset+size] if 0<=offset and offset+size<=len(rom) else None
+    head=read(pc,9)
+    if not head or head[:3]!=bytes.fromhex('060021') or head[5:]!=bytes.fromhex('092a666f'):return None
+    table=head[3]|head[4]<<8;cursor=pc+9
+    for _ in range(16):
+        if cursor-pc>48:return None
+        raw=read(cursor,1)
+        if not raw:return None
+        op=raw[0]
+        if op==0x11:
+            tail=read(cursor,5)
+            if not tail or tail[3:]!=bytes.fromhex('d5e9'):return None
+            return_pc=tail[1]|tail[2]<<8
+            if return_pc!=cursor+5:return None
+            epilogue=read(return_pc,4)
+            if not epilogue or not (epilogue[0]==0xC9 or epilogue==bytes.fromhex('c1d1e1c9')):return None
+            if diagnostics is not None:diagnostics['return_address']=return_pc
+            return table
+        # A/flags and BC argument setup cannot change the already resolved HL
+        # or the mapping. Calls, writes, stack effects and HL updates stop us.
+        if op in (0x00,0x47,0x4F,0x3C,0x3D) or 0x78<=op<=0xBF:cursor+=1
+        elif op in (0x01,0xFA,0xF0,0x3E,0xC6,0xCE,0xD6,0xDE,0xE6,0xEE,0xF6,0xFE):
+            size=instruction_length(op)
+            if read(cursor,size) is None:return None
+            cursor+=size
         else:return None
     return None
 
@@ -862,6 +932,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
     ram_callback_analyzer=RamCallbackAnalyzer(rom,_selected_bank_candidates)
     ram_callback_targets=set();ram_callback_returns=set();ram_callback_report={}
     indexed_call_targets=set();indexed_call_returns=set();indexed_call_reports=[]
+    inline_bc_targets=set();inline_bc_returns=set();inline_bc_tables=[]
     analyzed_size=-1;warned_contexts=set();warned_pair_limit=False
     while frontier or analyzed_size!=len(first):
         if not frontier:
@@ -927,6 +998,18 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
         elif fam not in ("RET","RETI","JP_HL","HALT","STOP","INVALID","UNCLASSIFIED"):
             successors=[fall]
         for address in successors:add_rom_block(rom_key(key,address))
+        if op==0x06:
+            inline_diagnostic={};table=inline_bc_call_table(rom,bank,pc,inline_diagnostic)
+            if table is not None:
+                scan={};candidates=bounded_pointer_table(key,table,max_entries=128,stop_at_targets=True,diagnostics=scan)
+                if len(candidates)>=2:
+                    for target_key in candidates:
+                        add_rom_block(target_key)
+                        if target_key in first:inline_bc_targets.add(target_key)
+                    return_key=rom_key(key,inline_diagnostic['return_address']);add_rom_block(return_key)
+                    if return_key in first:inline_bc_returns.add(return_key)
+                    inline_bc_tables.append(dict(bank=bank,pc=pc,table=table,return_address=inline_diagnostic['return_address'],
+                                                 entries=len(candidates),entry_limit=128,stop_reason=scan['stop_reason']))
         if op in (0x06,0x21):
             far_call_diagnostic={}
             for target_key in constant_far_call_targets(rom,bank,pc,diagnostics=far_call_diagnostic):
@@ -1041,7 +1124,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
                 block["idle_wait"]=True
     for block in blocks:block["native_lowered"]=native_body(block) is not None
     out.mkdir(parents=True,exist_ok=True)
-    (out/"trace-profile.json").write_text(json.dumps({"input":str(rom_path),"source_sha256":hashlib.sha256(rom).hexdigest(),"coverage_imports":coverage_imports,"fresh_dynamic_unique_block_count":fresh_dynamic_unique_block_count,"steps_per_scenario":steps,"auto_steps":auto_steps,"auto_inputs":auto_inputs,"test_serial":test_serial,"total_steps_executed":sum(s["steps_executed"] for s in scenario_reports),"dynamic_unique_blocks":dynamic_unique_block_count,"indirect_table_targets":len(indirect_table_targets),"hl_pointer_table_targets":len(hl_table_targets),"bitmask_dispatch_targets":len(bitmask_targets),"rst_inline_table_targets":len(rst_table_targets),"banked_thunk_targets":len(banked_thunk_targets),"constant_bank_call_targets":len(constant_bank_targets),"constant_far_call_targets":len(far_call_targets),"constant_far_call_returns":len(far_call_returns),"banked_pointer_table_targets":len(far_table_targets),"banked_pointer_tables":far_table_reports,"bank_context_targets":len(bank_context_targets),"indexed_call_targets":len(indexed_call_targets),"indexed_call_returns":len(indexed_call_returns),"indexed_call_tables":indexed_call_reports,"ram_callback_targets":len(ram_callback_targets),"ram_callback_returns":len(ram_callback_returns),"ram_callback_records":ram_callback_report.get("records",[]),"ram_callback_analysis_limits":{"pair_limit_reached":ram_callback_report.get("pair_limit_reached",False),"exhausted_contexts":ram_callback_report.get("exhausted_contexts",[])},"total_blocks_after_static_closure":len(blocks),"input_exploration":exploration_report,"scenarios":scenario_reports,"blocks":blocks},indent=2)+"\n")
+    (out/"trace-profile.json").write_text(json.dumps({"input":str(rom_path),"source_sha256":hashlib.sha256(rom).hexdigest(),"coverage_imports":coverage_imports,"fresh_dynamic_unique_block_count":fresh_dynamic_unique_block_count,"steps_per_scenario":steps,"auto_steps":auto_steps,"auto_inputs":auto_inputs,"test_serial":test_serial,"total_steps_executed":sum(s["steps_executed"] for s in scenario_reports),"dynamic_unique_blocks":dynamic_unique_block_count,"indirect_table_targets":len(indirect_table_targets),"hl_pointer_table_targets":len(hl_table_targets),"bitmask_dispatch_targets":len(bitmask_targets),"rst_inline_table_targets":len(rst_table_targets),"banked_thunk_targets":len(banked_thunk_targets),"constant_bank_call_targets":len(constant_bank_targets),"constant_far_call_targets":len(far_call_targets),"constant_far_call_returns":len(far_call_returns),"banked_pointer_table_targets":len(far_table_targets),"banked_pointer_tables":far_table_reports,"bank_context_targets":len(bank_context_targets),"inline_bc_call_targets":len(inline_bc_targets),"inline_bc_call_returns":len(inline_bc_returns),"inline_bc_call_tables":inline_bc_tables,"indexed_call_targets":len(indexed_call_targets),"indexed_call_returns":len(indexed_call_returns),"indexed_call_tables":indexed_call_reports,"ram_callback_targets":len(ram_callback_targets),"ram_callback_returns":len(ram_callback_returns),"ram_callback_records":ram_callback_report.get("records",[]),"ram_callback_analysis_limits":{"pair_limit_reached":ram_callback_report.get("pair_limit_reached",False),"exhausted_contexts":ram_callback_report.get("exhausted_contexts",[])},"total_blocks_after_static_closure":len(blocks),"input_exploration":exploration_report,"scenarios":scenario_reports,"blocks":blocks},indent=2)+"\n")
     emit_native_blocks(blocks,out)
     return blocks
 
@@ -1272,32 +1355,52 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
     pages={};banks={b['bank'] for b in blocks};max_bank=max(banks)
     for block in blocks:
         pages.setdefault((block['bank'],block['pc']>>8),{})[block['pc']&255]=label(block)
-    page_bytes=4*(max_bank+1)+1024*(2+len(banks)+len(pages))
-    if dispatch_format not in ('auto','paged','tree'):raise ValueError('unknown native dispatch format')
-    use_pages=dispatch_format=='paged' or dispatch_format=='auto' and page_bytes+96<24*len(blocks)
+    packed_pages=dispatch_format=='packed'
+    leaf_bytes=3 if packed_pages else 4
+    page_bytes=4*(max_bank+1)+1024*(1+len(banks))+256*leaf_bytes*(1+len(pages))
+    if dispatch_format not in ('auto','paged','packed','tree'):raise ValueError('unknown native dispatch format')
+    use_pages=dispatch_format in ('paged','packed') or dispatch_format=='auto' and page_bytes+96<24*len(blocks)
     if use_pages:
         lines += ["gb_dispatch_tree:","\tjsr gb_normalize_bank","\tmoveq #0,d0",
               "\tmove.w gb_bank,d0",f"\tcmpi.w #${max_bank:04X},d0","\tbls.s .dispatch_bank_in_range",
               "\tjmp gb_missing_block",".dispatch_bank_in_range:",
               "\tlsl.w #2,d0","\tlea gb_dispatch_banks,a0","\tmovea.l (a0,d0.w),a0",
               "\tmoveq #0,d0","\tmove.w gb_pc,d0","\tlsr.w #8,d0","\tlsl.w #2,d0",
-              "\tmovea.l (a0,d0.w),a0","\tmoveq #0,d0","\tmove.b gb_pc+1,d0",
-              "\tlsl.w #2,d0","\tmovea.l (a0,d0.w),a0","\tjmp (a0)","\teven",
-                  "gb_dispatch_banks:"]
+              "\tmovea.l (a0,d0.w),a0","\tmoveq #0,d0","\tmove.b gb_pc+1,d0"]
+        if packed_pages:
+            # Three byte loads are intentional: alternate 24-bit entries are
+            # odd-aligned, so word/long reads would bus-error on a real 68000.
+            # D7's scheduler credit remains untouched; D0/D1/A0 are scratch.
+            lines += ["\tmove.w d0,d1","\tadd.w d0,d0","\tadd.w d1,d0",
+                      "\tmoveq #0,d1","\tmove.b (a0,d0.w),d1","\tlsl.l #8,d1",
+                      "\tmove.b 1(a0,d0.w),d1","\tlsl.l #8,d1",
+                      "\tmove.b 2(a0,d0.w),d1","\tmovea.l d1,a0","\tjmp (a0)"]
+        else:
+            lines += ["\tlsl.w #2,d0","\tmovea.l (a0,d0.w),a0","\tjmp (a0)"]
+        lines += ["\teven","gb_dispatch_banks:"]
     def pointers(values):
         for index in range(0,len(values),8):lines.append("\tdc.l "+",".join(values[index:index+8]))
+    def leaf_pointers(values):
+        if not packed_pages:
+            pointers(values);return
+        for index in range(0,len(values),8):
+            items=[]
+            for value in values[index:index+8]:
+                items += [f"({value}>>16)&$FF",f"({value}>>8)&$FF",f"{value}&$FF"]
+            lines.append("\tdc.b "+",".join(items))
     if use_pages:
         pointers([f'gb_dispatch_bank_{bank:03X}' if bank in banks else 'gb_dispatch_empty_bank'
                   for bank in range(max_bank+1)])
         lines += ['gb_dispatch_empty_bank:','\tdcb.l 256,gb_dispatch_empty_page',
-                  'gb_dispatch_empty_page:','\tdcb.l 256,gb_missing_block']
+                  'gb_dispatch_empty_page:']
+        leaf_pointers(['gb_missing_block']*256)
         for bank in sorted(banks):
             lines.append(f'gb_dispatch_bank_{bank:03X}:')
             pointers([f'gb_dispatch_page_{bank:03X}_{page:02X}' if (bank,page) in pages else 'gb_dispatch_empty_page'
                       for page in range(256)])
         for (bank,page),entries in sorted(pages.items()):
             lines.append(f'gb_dispatch_page_{bank:03X}_{page:02X}:')
-            pointers([entries.get(offset,'gb_missing_block') for offset in range(256)])
+            leaf_pointers([entries.get(offset,'gb_missing_block') for offset in range(256)])
     else:
         # Sparse/tiny programs keep the smaller original decision tree.
         lines += ["gb_dispatch_tree:","\tjsr gb_normalize_bank","\tmoveq #0,d0","\tmove.w gb_bank,d0","\tswap d0","\tmove.w gb_pc,d0","\tjmp .dispatch_node_0"]
@@ -1333,7 +1436,8 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
                                for start,(sequence,target,cost) in sorted(fused_regions.items())],
         "block_catalog_included":include_block_table,
         "block_catalog_bytes":8*(len(blocks)+1) if include_block_table else 8,
-        "dispatch_format":"bank_page_table" if use_pages else "balanced_tree",
+        "dispatch_format":("bank_page_table_24" if packed_pages else "bank_page_table") if use_pages else "balanced_tree",
+        "dispatch_leaf_entry_bytes":leaf_bytes if use_pages else 0,
         "dispatch_pages":len(pages) if use_pages else 0,
         "dispatch_table_bytes":page_bytes if use_pages else 0},indent=2)+"\n")
     return blocks

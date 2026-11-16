@@ -23,7 +23,7 @@ def build(source,out,steps=100000,color_profile="green",input_scripts=(),auto_st
     out.mkdir(parents=True,exist_ok=True); rom_data=source.read_bytes(); scenarios=[parse_input_script(s) if isinstance(s,str) else s for s in input_scripts];blocks=compile_trace(source,out,steps,scenarios,auto_steps,auto_max_steps,auto_chunk_steps,auto_plateau_chunks,auto_min_new_blocks,auto_inputs,input_max_branches,input_max_depth,input_branch_steps,input_max_steps,input_hold_frames,input_snapshot_interval_frames,input_max_snapshots,input_bridge_states_per_depth,input_sweep_steps,test_serial,coverage_profiles=coverage_profiles)
     if not optimize_pure_chains or not optimize_hram:
         codegen=json.loads((out/'native-codegen-report.json').read_text())
-        emit_native_blocks(blocks,out,dispatch_format='paged' if codegen['dispatch_format']=='bank_page_table' else 'tree',
+        emit_native_blocks(blocks,out,dispatch_format={'bank_page_table':'paged','bank_page_table_24':'packed'}.get(codegen['dispatch_format'],'tree'),
                            max_hot_chains=codegen.get('hot_chain_limit'),include_block_table=codegen.get('block_catalog_included',True),optimize_pure_chains=optimize_pure_chains,
                            max_fused_regions=codegen.get('fused_register_region_limit',128),optimize_hram=optimize_hram)
     profile=COLOR_PROFILES[color_profile]
@@ -204,11 +204,17 @@ gb_cart_rom:
         catalog=codegen.get('block_catalog_included',bool(codegen))
         layout_attempts.append({'rom_bytes':size,'hot_chain_targets':hot,
                                 'hot_chain_limit':codegen.get('hot_chain_limit'),
-                                'block_catalog_included':catalog,'assembler_optimizations':not bool(assembler_options)})
+                                'block_catalog_included':catalog,'dispatch_format':codegen.get('dispatch_format'),'assembler_optimizations':not bool(assembler_options)})
         if size<=0x400000:break
         if catalog and not keep_rom_catalog:
             print('Native image exceeds 4 MiB; omitting the unused duplicate ROM block catalog (dispatch entries and trace reports retained). Use --keep-rom-catalog to require it.',flush=True)
             emit_native_blocks(blocks,out,max_hot_chains=codegen.get('hot_chain_limit'),include_block_table=False,optimize_pure_chains=optimize_pure_chains,
+                               max_fused_regions=codegen.get('fused_register_region_limit',128),optimize_hram=optimize_hram)
+            continue
+        if codegen.get('dispatch_format')=='bank_page_table':
+            print('Native image exceeds 4 MiB; packing leaf dispatch addresses into 24 bits (all native blocks retained).',flush=True)
+            emit_native_blocks(blocks,out,dispatch_format='packed',max_hot_chains=codegen.get('hot_chain_limit'),
+                               include_block_table=catalog,optimize_pure_chains=optimize_pure_chains,
                                max_fused_regions=codegen.get('fused_register_region_limit',128),optimize_hram=optimize_hram)
             continue
         if hot<=0:
@@ -219,7 +225,7 @@ gb_cart_rom:
         # entries. The shared scheduler already implements the same checks.
         limit=hot//2
         print(f'Native image {size:,} bytes exceeds 4 MiB; retrying with {limit} profile-ranked inline scheduler stubs (all blocks retained)',flush=True)
-        emit_native_blocks(blocks,out,max_hot_chains=limit,include_block_table=catalog,optimize_pure_chains=optimize_pure_chains,
+        emit_native_blocks(blocks,out,dispatch_format={'bank_page_table':'paged','bank_page_table_24':'packed'}.get(codegen.get('dispatch_format'),'auto'),max_hot_chains=limit,include_block_table=catalog,optimize_pure_chains=optimize_pure_chains,
                            max_fused_regions=codegen.get('fused_register_region_limit',128),optimize_hram=optimize_hram)
     image.extend(bytes(size-len(image)))
     struct.pack_into(">I",image,0x1A4,size-1)
@@ -233,10 +239,11 @@ gb_cart_rom:
         "banked_pointer_tables":trace_report.get("banked_pointer_tables",[]),
         "ram_callback_records":trace_report.get("ram_callback_records",[]),
         "indexed_call_tables":trace_report.get("indexed_call_tables",[]),
+        "inline_bc_call_tables":trace_report.get("inline_bc_call_tables",[]),
         "ram_callback_analysis_limits":trace_report.get("ram_callback_analysis_limits",{}),
         **{name:trace_report.get(name,0) for name in (
             "indirect_table_targets","hl_pointer_table_targets","bitmask_dispatch_targets","rst_inline_table_targets",
-            "constant_bank_call_targets","constant_far_call_targets","constant_far_call_returns","banked_pointer_table_targets","bank_context_targets","ram_callback_targets","ram_callback_returns","indexed_call_targets","indexed_call_returns")},
+            "constant_bank_call_targets","constant_far_call_targets","constant_far_call_returns","banked_pointer_table_targets","bank_context_targets","inline_bc_call_targets","inline_bc_call_returns","ram_callback_targets","ram_callback_returns","indexed_call_targets","indexed_call_returns")},
         "trace_stop_reasons":[s["stop_reason"] for s in trace_report["scenarios"]],
         "input_exploration":trace_report["input_exploration"],"input_scripts":list(input_scripts),
         "color_profile":color_profile,"blocks":len(blocks),
