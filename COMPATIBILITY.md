@@ -1,5 +1,42 @@
 # GB2MD compatibility status
 
+## Incremental native Pokémon route: Oak and laboratory — 2026-11-16
+
+A further private development run verified native execution from fresh boot
+through naming, house exit, outdoor movement, Oak's warning conversation and
+the walk into his laboratory. BLUE's dialogue begins inside; room graphics,
+characters and the three starter Poké Balls are visible. These observations
+establish a longer working route, not starter selection or playable battles.
+
+The preceding candidate trapped after Oak's “come with me” conversation.
+The missing native callback matched the first uncompiled entry observed in
+Python. It was reached through a synthetic-return dispatcher whose table base
+itself came from another pointer table and whose bank came from RAM. The
+existing bounded static proofs do not establish that complete chain. No
+controller or mapper defect was demonstrated at that failure point.
+
+The laboratory candidate uses the existing validated `--coverage-profile`
+option to add 65 instructions actually executed in a bounded reference
+continuation. Ordinary static closure adds further reachable entries. It
+contains 39,559 instruction entries and occupies 4,180,984 bytes, leaving
+13,320 bytes under the current 4 MiB limit. All previous entries are retained;
+no CPU, peripheral, runtime or input semantics were changed for this route.
+This is incremental coverage reuse, **not a fresh automatic GUI build**. ROMs,
+profiles, generated assembly, screenshots and checkpoints remain private.
+
+After BLUE’s first laboratory conversation closes, native execution traps on
+an untranslated inline-script entry. It matches Python’s first missing entry.
+There were 129 clean samples before this trap; starter selection remains
+unverified. General automatic script/indirect-flow discovery and native
+code-size scaling remain open.
+Performance, complete rendering, starter selection, battles, saves and actual
+hardware have not been validated by this route. No speed improvement is claimed.
+
+Fresh fast regression: **191 PASS / 28 native-only skips** (219 methods).
+The earlier **219 native-enabled method passes** and **43 selected fresh
+Python/forced-packed native protocol passes** apply to the unchanged published
+compiler source; those larger runs were not repeated in this continuation.
+
 ## House exit, indirect calls and ROM capacity — 2026-11-16
 
 The prior Pokémon candidate froze during movement toward the front door:
