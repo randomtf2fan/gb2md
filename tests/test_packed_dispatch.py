@@ -33,22 +33,23 @@ class PackedDispatchTests(unittest.TestCase):
             rom[0x650:0x652]=bytes.fromhex('18fe');source=root/'original.gb';source.write_bytes(rom)
             assembler=root/'assembler';assembler.touch();calls=[]
             def assemble(command,**kwargs):
-                calls.append(command);Path(command[-1]).write_bytes(bytes(0x400002 if len(calls)<4 else 0x80000))
+                calls.append(command);Path(command[-1]).write_bytes(bytes(0x400002 if len(calls)<5 else 0x80000))
             with patch.object(compiler,'compile_trace',wraps=compiler.compile_trace) as discovered,patch.object(compiler.subprocess,'run',side_effect=assemble):
                 compiler.build(source,root/'out',2,assembler=assembler,optimize_hram=False,optimize_pure_chains=False)
             report=json.loads((root/'out/build-report.json').read_text());a=report['native_layout_attempts']
             self.assertEqual(discovered.call_count,1)
-            self.assertEqual([x['dispatch_format'] for x in a],['bank_page_table','bank_page_table','bank_page_table_24','bank_page_table_24'])
-            self.assertEqual([x['block_catalog_included'] for x in a],[True,False,False,False])
+            self.assertEqual([x['dispatch_format'] for x in a],['bank_page_table','bank_page_table','bank_page_table_24','bank_page_table_24_trimmed','bank_page_table_24_trimmed'])
+            self.assertEqual([x['block_catalog_included'] for x in a],[True,False,False,False,False])
             self.assertEqual(a[0]['hot_chain_targets'],a[2]['hot_chain_targets'])
-            self.assertLess(a[3]['hot_chain_targets'],a[2]['hot_chain_targets'])
+            self.assertEqual(a[3]['hot_chain_targets'],a[2]['hot_chain_targets'])
+            self.assertLess(a[4]['hot_chain_targets'],a[3]['hot_chain_targets'])
             stats=json.loads((root/'out/native-codegen-report.json').read_text())
             self.assertFalse(stats['optimize_hram']);self.assertFalse(stats['optimize_pure_chains'])
 
     def native_build(self,source,out,steps,pad=False):
         original=compiler.compile_trace
         def discover(*args,**kwargs):
-            blocks=original(*args,**kwargs);trace.emit_native_blocks(blocks,args[1],dispatch_format='packed')
+            blocks=original(*args,**kwargs);trace.emit_native_blocks(blocks,args[1],dispatch_format=getattr(self,'dispatch_format','packed'))
             if pad:
                 p=args[1]/'translated_trace.s';s=p.read_text()
                 s,count=re.subn(r'(gb_compiled_entry:\n)\tbra.w (L_gb_[^\n]+)',r'\1\tjmp \2\n\tdcb.b $123456,0',s,count=1)

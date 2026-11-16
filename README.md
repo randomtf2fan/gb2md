@@ -117,7 +117,8 @@ helper arithmetic and report truncation. These improve coverage but do not
 guarantee that every computed jump is discovered. Cold native scheduler stubs
 share code to reduce output size. If an image exceeds the supported 4 MiB
 layout, the builder first omits an unused duplicate ROM debug catalog, then
-tries profile-ranked compact scheduler stubs while retaining every translated
+tries packed and bounded dispatch leaves before profile-ranked compact
+scheduler stubs, retaining every translated
 entry. `--keep-rom-catalog` retains the export for external debugging tools. If it still cannot fit, compilation fails before
 replacing an existing `recompiled.md`. Larger cartridge mapping is unsupported.
 
@@ -341,6 +342,14 @@ addresses in three bytes. The builder tries this automatically after optional
 catalog omission and before reducing inline scheduler quotas; all code and
 missing-block diagnostics remain present. Fitting images keep their existing
 four-byte leaf format. The final cartridge window remains limited to 4 MiB.
+
+If the packed image is still oversized, the builder can bound each leaf table
+to its first and last populated instruction slots. Explicit bounds checks trap
+outside that range; missing slots inside it keep their diagnostic pointers.
+Every discovered entry remains compiled. Bank/page directories stay aligned,
+and packed addresses use byte reads. This is an automatic capacity fallback
+used by both CLI and GUI builds, not a coverage or universal speed guarantee.
+
 
 ## Sources
 

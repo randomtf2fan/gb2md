@@ -1116,3 +1116,41 @@ metadata bytes and the format of every layout attempt. Explicit `paged` and
 exercise addresses above 0x123456, odd slots, page boundaries, missing entries,
 IRQ flow, mapper changes and MBC5 bank zero. A preserved-coverage Tetris rebuild
 remains byte-identical to its prior normal-table checkpoint.
+
+
+## Bounded packed dispatch pages (2026-11-16)
+
+`emit_native_blocks(..., dispatch_format="trimmed")` adds a capacity-only layout
+for images that cannot fit with full packed leaves. `build` tries it after the
+packed fallback and before reducing fast scheduler quotas, when the estimated
+table data would shrink. Fitting images keep their existing output format.
+Later quota and assembler-convergence retries retain the chosen layout and
+optimization settings through `write_target`.
+
+Each page directory still contains an aligned 32-bit native pointer. Its leaf
+begins with two bytes: the lowest populated `PC & 255` slot and the inclusive
+span to the highest slot. A singleton has span 0; a full 256-slot page has
+span 255. Lookup subtracts the first slot, traps on unsigned underflow, and
+traps if the resulting index exceeds the span. Remaining internal holes still
+contain `gb_missing_block` pointers. It then performs the same three byte reads
+as the packed format. The shared empty leaf also traps for every possible PC.
+
+The two-byte header and byte-wise pointer reads permit odd packed entries;
+each leaf ends with `even` so following directories/labels remain aligned.
+Only scratch D0/D1/A0 are used; scheduler D7 is preserved. All generated bodies,
+guarded RAM variants, bank normalization and interrupt/scheduler semantics
+remain unchanged. Removing unused table slots is not removing source code or
+proving that undiscovered paths are covered.
+
+Reports call this `bank_page_table_24_trimmed`. `dispatch_table_bytes` measures
+the selected layout including per-leaf alignment; `dispatch_trimmed_table_bytes`
+provides the candidate size before retrying. These are table data sizes, not
+the whole image or a throughput benchmark. Extra bounds checks cost work on
+indirect dispatch, while smaller metadata can retain more fast chain entries.
+The builder still enforces 4 MiB and fails rather than dropping required code.
+
+Original fixtures in `tests/test_trimmed_dispatch.py` cover singleton/full-page
+spans and exact aligned byte accounting, plus native low/high out-of-range
+PCs, internal holes, high native addresses, odd slots, page boundaries,
+missing banks, interrupts and MBC5 bank zero. The existing capacity retry test
+also checks format/option retention and the ordering before quota reduction.

@@ -1,5 +1,47 @@
 # GB2MD compatibility status
 
+## Bounded native dispatch capacity — 2026-11-16
+
+Extending the private reference route through starter selection and rival battle
+initialization exposed a hard size limit: even the fully shared scheduler
+layout required 4,228,872 bytes, exceeding the current 4 MiB cartridge window.
+The builder now has a general capacity fallback that bounds packed dispatch
+leaves by their lowest/highest populated instruction slots. Explicit range
+checks preserve out-of-range traps; internal holes keep diagnostic pointers.
+No executable entries are dropped, and no title/hash/address rules are added.
+Fitting images retain their previous output. CLI and GUI both use this builder;
+no new GUI setting or runtime CPU/peripheral change is required.
+
+For the current 41,625-entry candidate, table data shrank from 494,464 to 319,588
+bytes for the same graph, saving 174,876 bytes. The complete image fits in
+4,172,766 bytes with 1,101 fast scheduler entries retained. This is a capacity
+result, not a universal throughput improvement or proof of complete coverage.
+The route still uses validated imported observations rather than fresh GUI
+tracing. General automatic script discovery remains incomplete.
+
+Validation:
+
+- **225/225 native-enabled unit-method results PASS**. One initial BlastEm host
+  JIT launch failed before guest execution with an x86 relative-address error;
+  the unchanged method passed on retry. The original failure is retained.
+- **43/43 selected fixtures PASS in fresh Python and forced bounded-layout
+  native execution**: 14 instruction timing, 14 timer/reg_f, 5 interrupt control,
+  and 10 additional interrupt/memory cases. The outer protocol launcher reported
+  SIGTERM after all 43 passing records were saved; individual protocol results
+  passed. This is not a claim about every downloaded test suite.
+- Fast suites in both copies: **193 PASS / 32 native-only skips** (225 methods).
+  Six new original methods cover range headers, full pages, byte accounting,
+  native range checks/holes, high/odd addresses, page edges, IRQs and mappers.
+- A preserved-coverage Tetris rebuild remains byte-identical to ca61322a.
+
+At this validation point, actual native fresh boot, Oak/lab conversations and
+Charmander inspection/selection are verified with zero missing-block markers.
+The inspection picture renders. Rival battle and attack exchanges are still
+being tested; Python-only progress is not counted as native gameplay success.
+Speed remains limited; physical hardware and full-game compatibility are not
+verified by these runs. Commercial artifacts and coverage profiles stay private.
+
+
 ## Incremental native Pokémon route: Oak and laboratory — 2026-11-16
 
 A further private development run verified native execution from fresh boot

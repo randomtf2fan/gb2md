@@ -1355,11 +1355,20 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
     pages={};banks={b['bank'] for b in blocks};max_bank=max(banks)
     for block in blocks:
         pages.setdefault((block['bank'],block['pc']>>8),{})[block['pc']&255]=label(block)
-    packed_pages=dispatch_format=='packed'
+    trimmed_pages=dispatch_format=='trimmed'
+    packed_pages=dispatch_format in ('packed','trimmed')
     leaf_bytes=3 if packed_pages else 4
-    page_bytes=4*(max_bank+1)+1024*(1+len(banks))+256*leaf_bytes*(1+len(pages))
-    if dispatch_format not in ('auto','paged','packed','tree'):raise ValueError('unknown native dispatch format')
-    use_pages=dispatch_format in ('paged','packed') or dispatch_format=='auto' and page_bytes+96<24*len(blocks)
+    directory_bytes=4*(max_bank+1)+1024*(1+len(banks))
+    # Two header bytes store the first slot and the inclusive span. Empty
+    # leading/trailing slots become explicit bounds traps, not removed code.
+    trimmed_leaf_bytes=6
+    for entries in pages.values():
+        size=2+3*(max(entries)-min(entries)+1)
+        trimmed_leaf_bytes+=size+(size&1)
+    trimmed_page_bytes=directory_bytes+trimmed_leaf_bytes
+    page_bytes=trimmed_page_bytes if trimmed_pages else directory_bytes+256*leaf_bytes*(1+len(pages))
+    if dispatch_format not in ('auto','paged','packed','trimmed','tree'):raise ValueError('unknown native dispatch format')
+    use_pages=dispatch_format in ('paged','packed','trimmed') or dispatch_format=='auto' and page_bytes+96<24*len(blocks)
     if use_pages:
         lines += ["gb_dispatch_tree:","\tjsr gb_normalize_bank","\tmoveq #0,d0",
               "\tmove.w gb_bank,d0",f"\tcmpi.w #${max_bank:04X},d0","\tbls.s .dispatch_bank_in_range",
@@ -1367,6 +1376,11 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
               "\tlsl.w #2,d0","\tlea gb_dispatch_banks,a0","\tmovea.l (a0,d0.w),a0",
               "\tmoveq #0,d0","\tmove.w gb_pc,d0","\tlsr.w #8,d0","\tlsl.w #2,d0",
               "\tmovea.l (a0,d0.w),a0","\tmoveq #0,d0","\tmove.b gb_pc+1,d0"]
+        if trimmed_pages:
+            lines += ["\tmoveq #0,d1","\tmove.b (a0)+,d1","\tsub.w d1,d0",
+                      "\tbcs.s .dispatch_page_missing","\tmoveq #0,d1",
+                      "\tmove.b (a0)+,d1","\tcmp.w d1,d0",
+                      "\tbhi.s .dispatch_page_missing"]
         if packed_pages:
             # Three byte loads are intentional: alternate 24-bit entries are
             # odd-aligned, so word/long reads would bus-error on a real 68000.
@@ -1377,6 +1391,7 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
                       "\tmove.b 2(a0,d0.w),d1","\tmovea.l d1,a0","\tjmp (a0)"]
         else:
             lines += ["\tlsl.w #2,d0","\tmovea.l (a0,d0.w),a0","\tjmp (a0)"]
+        if trimmed_pages:lines += [".dispatch_page_missing:","\tjmp gb_missing_block"]
         lines += ["\teven","gb_dispatch_banks:"]
     def pointers(values):
         for index in range(0,len(values),8):lines.append("\tdc.l "+",".join(values[index:index+8]))
@@ -1393,14 +1408,21 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
                   for bank in range(max_bank+1)])
         lines += ['gb_dispatch_empty_bank:','\tdcb.l 256,gb_dispatch_empty_page',
                   'gb_dispatch_empty_page:']
-        leaf_pointers(['gb_missing_block']*256)
+        if trimmed_pages:
+            lines.append('\tdc.b 0,0')
+            leaf_pointers(['gb_missing_block'])
+            lines.append('\teven')
+        else:leaf_pointers(['gb_missing_block']*256)
         for bank in sorted(banks):
             lines.append(f'gb_dispatch_bank_{bank:03X}:')
             pointers([f'gb_dispatch_page_{bank:03X}_{page:02X}' if (bank,page) in pages else 'gb_dispatch_empty_page'
                       for page in range(256)])
         for (bank,page),entries in sorted(pages.items()):
             lines.append(f'gb_dispatch_page_{bank:03X}_{page:02X}:')
-            leaf_pointers([entries.get(offset,'gb_missing_block') for offset in range(256)])
+            first,last=(min(entries),max(entries)) if trimmed_pages else (0,255)
+            if trimmed_pages:lines.append(f'\tdc.b {first},{last-first}')
+            leaf_pointers([entries.get(offset,'gb_missing_block') for offset in range(first,last+1)])
+            if trimmed_pages:lines.append('\teven')
     else:
         # Sparse/tiny programs keep the smaller original decision tree.
         lines += ["gb_dispatch_tree:","\tjsr gb_normalize_bank","\tmoveq #0,d0","\tmove.w gb_bank,d0","\tswap d0","\tmove.w gb_pc,d0","\tjmp .dispatch_node_0"]
@@ -1436,10 +1458,11 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
                                for start,(sequence,target,cost) in sorted(fused_regions.items())],
         "block_catalog_included":include_block_table,
         "block_catalog_bytes":8*(len(blocks)+1) if include_block_table else 8,
-        "dispatch_format":("bank_page_table_24" if packed_pages else "bank_page_table") if use_pages else "balanced_tree",
+        "dispatch_format":("bank_page_table_24_trimmed" if trimmed_pages else "bank_page_table_24" if packed_pages else "bank_page_table") if use_pages else "balanced_tree",
         "dispatch_leaf_entry_bytes":leaf_bytes if use_pages else 0,
         "dispatch_pages":len(pages) if use_pages else 0,
-        "dispatch_table_bytes":page_bytes if use_pages else 0},indent=2)+"\n")
+        "dispatch_table_bytes":page_bytes if use_pages else 0,
+        "dispatch_trimmed_table_bytes":trimmed_page_bytes if use_pages else 0},indent=2)+"\n")
     return blocks
 
 def main():
