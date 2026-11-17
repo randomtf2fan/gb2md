@@ -351,6 +351,16 @@ Every discovered entry remains compiled. Bank/page directories stay aligned,
 and packed addresses use byte reads. This is an automatic capacity fallback
 used by both CLI and GUI builds, not a coverage or universal speed guarantee.
 
+If a bounded packed image remains oversized, nonzero execution-bank page
+directories can be restricted to the normalized upper ROM window. Bank zero
+keeps its complete directory, including MBC5 upper bank zero and RAM code.
+This fallback preserves all entries and diagnostic traps and needs no GUI
+setting. The final 4 MiB limit still applies.
+
+Static discovery also accepts a bounded byte-offset ROM lookup when its index
+was prepared before loading the table base. It does not prove complete computed
+jump or script coverage; imported coverage remains an advanced CLI option.
+
 
 ## Sources
 

@@ -287,6 +287,13 @@ def hl_dispatch_table(rom,bank,pc,diagnostics=None):
     # Inline A*2 / BC-index / little-endian HL lookup, with optional BC save.
     inline=(bytes.fromhex('c58706004f09c12a666fe9'),bytes.fromhex('8706004f092a666fe9'))
     if any(read(cursor,len(signature))==signature for signature in inline):return table
+    # A may already be scaled before loading the base, or may be a byte
+    # offset supplied by the caller. B=0 proves a bounded byte index; aligned
+    # words are coverage candidates, not proof that odd offsets cannot occur.
+    if read(cursor,8)==bytes.fromhex('06004f092a666fe9'):
+        if diagnostics is not None:
+            diagnostics.update(table_only=True,entry_limit=128,min_entries=2)
+        return table
     def callback_return(helper):
         seen=set()
         for _ in range(4):
@@ -931,7 +938,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
         if vector < len(rom) and rom[vector] not in (0x00,0xFF):add_rom_block((0,vector))
     ram_callback_analyzer=RamCallbackAnalyzer(rom,_selected_bank_candidates)
     ram_callback_targets=set();ram_callback_returns=set();ram_callback_report={}
-    indexed_call_targets=set();indexed_call_returns=set();indexed_call_reports=[]
+    indexed_call_targets=set();indexed_call_returns=set();indexed_call_reports=[];inline_offset_tables=[]
     inline_bc_targets=set();inline_bc_returns=set();inline_bc_tables=[]
     analyzed_size=-1;warned_contexts=set();warned_pair_limit=False
     while frontier or analyzed_size!=len(first):
@@ -1062,8 +1069,11 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
                 if len(candidates)>=dispatch_diagnostic.get('min_entries',2):
                     for target_key in candidates:
                         hl_table_targets.add(target_key);indirect_table_targets.add(target_key);add_rom_block(target_key)
-                        if dispatch_diagnostic and target_key in first:indexed_call_targets.add(target_key)
-                    if dispatch_diagnostic:
+                        if 'return_address' in dispatch_diagnostic and target_key in first:indexed_call_targets.add(target_key)
+                    if dispatch_diagnostic.get('table_only'):
+                        inline_offset_tables.append(dict(bank=bank,pc=pc,table=table,
+                            entries=len(candidates),entry_limit=128,stop_reason=scan_diagnostic['stop_reason']))
+                    if 'return_address' in dispatch_diagnostic:
                         return_key=rom_key(key,dispatch_diagnostic['return_address']);add_rom_block(return_key)
                         if return_key in first:indexed_call_returns.add(return_key)
                         indexed_call_reports.append(dict(bank=bank,pc=pc,table=table,
@@ -1124,7 +1134,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
                 block["idle_wait"]=True
     for block in blocks:block["native_lowered"]=native_body(block) is not None
     out.mkdir(parents=True,exist_ok=True)
-    (out/"trace-profile.json").write_text(json.dumps({"input":str(rom_path),"source_sha256":hashlib.sha256(rom).hexdigest(),"coverage_imports":coverage_imports,"fresh_dynamic_unique_block_count":fresh_dynamic_unique_block_count,"steps_per_scenario":steps,"auto_steps":auto_steps,"auto_inputs":auto_inputs,"test_serial":test_serial,"total_steps_executed":sum(s["steps_executed"] for s in scenario_reports),"dynamic_unique_blocks":dynamic_unique_block_count,"indirect_table_targets":len(indirect_table_targets),"hl_pointer_table_targets":len(hl_table_targets),"bitmask_dispatch_targets":len(bitmask_targets),"rst_inline_table_targets":len(rst_table_targets),"banked_thunk_targets":len(banked_thunk_targets),"constant_bank_call_targets":len(constant_bank_targets),"constant_far_call_targets":len(far_call_targets),"constant_far_call_returns":len(far_call_returns),"banked_pointer_table_targets":len(far_table_targets),"banked_pointer_tables":far_table_reports,"bank_context_targets":len(bank_context_targets),"inline_bc_call_targets":len(inline_bc_targets),"inline_bc_call_returns":len(inline_bc_returns),"inline_bc_call_tables":inline_bc_tables,"indexed_call_targets":len(indexed_call_targets),"indexed_call_returns":len(indexed_call_returns),"indexed_call_tables":indexed_call_reports,"ram_callback_targets":len(ram_callback_targets),"ram_callback_returns":len(ram_callback_returns),"ram_callback_records":ram_callback_report.get("records",[]),"ram_callback_analysis_limits":{"pair_limit_reached":ram_callback_report.get("pair_limit_reached",False),"exhausted_contexts":ram_callback_report.get("exhausted_contexts",[])},"total_blocks_after_static_closure":len(blocks),"input_exploration":exploration_report,"scenarios":scenario_reports,"blocks":blocks},indent=2)+"\n")
+    (out/"trace-profile.json").write_text(json.dumps({"input":str(rom_path),"source_sha256":hashlib.sha256(rom).hexdigest(),"coverage_imports":coverage_imports,"fresh_dynamic_unique_block_count":fresh_dynamic_unique_block_count,"steps_per_scenario":steps,"auto_steps":auto_steps,"auto_inputs":auto_inputs,"test_serial":test_serial,"total_steps_executed":sum(s["steps_executed"] for s in scenario_reports),"dynamic_unique_blocks":dynamic_unique_block_count,"indirect_table_targets":len(indirect_table_targets),"hl_pointer_table_targets":len(hl_table_targets),"inline_byte_offset_tables":inline_offset_tables,"bitmask_dispatch_targets":len(bitmask_targets),"rst_inline_table_targets":len(rst_table_targets),"banked_thunk_targets":len(banked_thunk_targets),"constant_bank_call_targets":len(constant_bank_targets),"constant_far_call_targets":len(far_call_targets),"constant_far_call_returns":len(far_call_returns),"banked_pointer_table_targets":len(far_table_targets),"banked_pointer_tables":far_table_reports,"bank_context_targets":len(bank_context_targets),"inline_bc_call_targets":len(inline_bc_targets),"inline_bc_call_returns":len(inline_bc_returns),"inline_bc_call_tables":inline_bc_tables,"indexed_call_targets":len(indexed_call_targets),"indexed_call_returns":len(indexed_call_returns),"indexed_call_tables":indexed_call_reports,"ram_callback_targets":len(ram_callback_targets),"ram_callback_returns":len(ram_callback_returns),"ram_callback_records":ram_callback_report.get("records",[]),"ram_callback_analysis_limits":{"pair_limit_reached":ram_callback_report.get("pair_limit_reached",False),"exhausted_contexts":ram_callback_report.get("exhausted_contexts",[])},"total_blocks_after_static_closure":len(blocks),"input_exploration":exploration_report,"scenarios":scenario_reports,"blocks":blocks},indent=2)+"\n")
     emit_native_blocks(blocks,out)
     return blocks
 
@@ -1355,8 +1365,11 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
     pages={};banks={b['bank'] for b in blocks};max_bank=max(banks)
     for block in blocks:
         pages.setdefault((block['bank'],block['pc']>>8),{})[block['pc']&255]=label(block)
-    trimmed_pages=dispatch_format=='trimmed'
-    packed_pages=dispatch_format in ('packed','trimmed')
+    windowed_pages=dispatch_format=='windowed'
+    trimmed_pages=dispatch_format in ('trimmed','windowed')
+    packed_pages=dispatch_format in ('packed','trimmed','windowed')
+    if windowed_pages and any(b['bank'] and not 0x4000<=b['pc']<0x8000 for b in blocks):
+        raise ValueError('windowed dispatch requires normalized bank/PC identities')
     leaf_bytes=3 if packed_pages else 4
     directory_bytes=4*(max_bank+1)+1024*(1+len(banks))
     # Two header bytes store the first slot and the inclusive span. Empty
@@ -1366,16 +1379,24 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
         size=2+3*(max(entries)-min(entries)+1)
         trimmed_leaf_bytes+=size+(size&1)
     trimmed_page_bytes=directory_bytes+trimmed_leaf_bytes
-    page_bytes=trimmed_page_bytes if trimmed_pages else directory_bytes+256*leaf_bytes*(1+len(pages))
-    if dispatch_format not in ('auto','paged','packed','trimmed','tree'):raise ValueError('unknown native dispatch format')
-    use_pages=dispatch_format in ('paged','packed','trimmed') or dispatch_format=='auto' and page_bytes+96<24*len(blocks)
+    windowed_directory_bytes=4*(max_bank+1)+1024+sum(4*(64 if bank else 256) for bank in banks)
+    windowed_page_bytes=windowed_directory_bytes+trimmed_leaf_bytes
+    page_bytes=windowed_page_bytes if windowed_pages else trimmed_page_bytes if trimmed_pages else directory_bytes+256*leaf_bytes*(1+len(pages))
+    if dispatch_format not in ('auto','paged','packed','trimmed','windowed','tree'):raise ValueError('unknown native dispatch format')
+    use_pages=dispatch_format in ('paged','packed','trimmed','windowed') or dispatch_format=='auto' and page_bytes+96<24*len(blocks)
     if use_pages:
         lines += ["gb_dispatch_tree:","\tjsr gb_normalize_bank","\tmoveq #0,d0",
               "\tmove.w gb_bank,d0",f"\tcmpi.w #${max_bank:04X},d0","\tbls.s .dispatch_bank_in_range",
               "\tjmp gb_missing_block",".dispatch_bank_in_range:",
               "\tlsl.w #2,d0","\tlea gb_dispatch_banks,a0","\tmovea.l (a0,d0.w),a0",
-              "\tmoveq #0,d0","\tmove.w gb_pc,d0","\tlsr.w #8,d0","\tlsl.w #2,d0",
-              "\tmovea.l (a0,d0.w),a0","\tmoveq #0,d0","\tmove.b gb_pc+1,d0"]
+              "\tmoveq #0,d0","\tmove.w gb_pc,d0","\tlsr.w #8,d0"]
+        if windowed_pages:
+            # gb_normalize_bank guarantees nonzero identities only in the
+            # upper ROM window. Bank zero still includes MBC5's upper bank0.
+            lines += ['\ttst.w gb_bank','\tbeq.s .dispatch_page_bias_ready',
+                      '\tsubi.w #$40,d0','.dispatch_page_bias_ready:']
+        lines += ["\tlsl.w #2,d0","\tmovea.l (a0,d0.w),a0",
+                  "\tmoveq #0,d0","\tmove.b gb_pc+1,d0"]
         if trimmed_pages:
             lines += ["\tmoveq #0,d1","\tmove.b (a0)+,d1","\tsub.w d1,d0",
                       "\tbcs.s .dispatch_page_missing","\tmoveq #0,d1",
@@ -1415,8 +1436,9 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
         else:leaf_pointers(['gb_missing_block']*256)
         for bank in sorted(banks):
             lines.append(f'gb_dispatch_bank_{bank:03X}:')
+            bank_pages=range(0x40,0x80) if windowed_pages and bank else range(256)
             pointers([f'gb_dispatch_page_{bank:03X}_{page:02X}' if (bank,page) in pages else 'gb_dispatch_empty_page'
-                      for page in range(256)])
+                      for page in bank_pages])
         for (bank,page),entries in sorted(pages.items()):
             lines.append(f'gb_dispatch_page_{bank:03X}_{page:02X}:')
             first,last=(min(entries),max(entries)) if trimmed_pages else (0,255)
@@ -1458,11 +1480,12 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
                                for start,(sequence,target,cost) in sorted(fused_regions.items())],
         "block_catalog_included":include_block_table,
         "block_catalog_bytes":8*(len(blocks)+1) if include_block_table else 8,
-        "dispatch_format":("bank_page_table_24_trimmed" if trimmed_pages else "bank_page_table_24" if packed_pages else "bank_page_table") if use_pages else "balanced_tree",
+        "dispatch_format":("bank_page_table_24_windowed" if windowed_pages else "bank_page_table_24_trimmed" if trimmed_pages else "bank_page_table_24" if packed_pages else "bank_page_table") if use_pages else "balanced_tree",
         "dispatch_leaf_entry_bytes":leaf_bytes if use_pages else 0,
         "dispatch_pages":len(pages) if use_pages else 0,
         "dispatch_table_bytes":page_bytes if use_pages else 0,
-        "dispatch_trimmed_table_bytes":trimmed_page_bytes if use_pages else 0},indent=2)+"\n")
+        "dispatch_trimmed_table_bytes":trimmed_page_bytes if use_pages else 0,
+        "dispatch_windowed_table_bytes":windowed_page_bytes if use_pages else 0},indent=2)+"\n")
     return blocks
 
 def main():

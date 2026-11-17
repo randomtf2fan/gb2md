@@ -1125,7 +1125,7 @@ for images that cannot fit with full packed leaves. `build` tries it after the
 packed fallback and before reducing fast scheduler quotas, when the estimated
 table data would shrink. Fitting images keep their existing output format.
 Later quota and assembler-convergence retries retain the chosen layout and
-optimization settings through `write_target`.
+optimization settings in `build`. Assembler retries reuse the generated assembly.
 
 Each page directory still contains an aligned 32-bit native pointer. Its leaf
 begins with two bytes: the lowest populated `PC & 255` slot and the inclusive
@@ -1154,3 +1154,47 @@ spans and exact aligned byte accounting, plus native low/high out-of-range
 PCs, internal holes, high native addresses, odd slots, page boundaries,
 missing banks, interrupts and MBC5 bank zero. The existing capacity retry test
 also checks format/option retention and the ordering before quota reduction.
+
+
+## Byte-offset lookup order and bank-window directories (2026-11-17)
+
+`hl_dispatch_table` now recognizes the exact suffix
+`LD B,0 / LD C,A / ADD HL,BC / LD A,(HL+) / LD H,(HL) / LD L,A / JP (HL)`
+after `LD HL,table`. The caller may have doubled A before loading HL; it may
+also supply an already prepared byte offset. The static analyzer therefore
+finds this table without requiring multiplication at a particular location.
+It does not rewrite the source arithmetic or replace the live lookup.
+
+The `table_only` diagnostic distinguishes this jump from a synthetic-return
+callback. `compile_trace` scans at most 128 aligned word candidates, requires
+at least two valid pointers, retains the physical bank, and stops before the
+first known forward code target. Unknown mappings, ROM-window boundaries and
+invalid pointers terminate the scan. Aligned candidates do not establish all
+possible odd-offset destinations. New `inline_byte_offset_tables` records
+identify these static discoveries separately from current dynamic execution.
+No fake call return is inferred from this form.
+
+The extra discovered code can increase cartridge size. An optional automatic
+capacity layout, `emit_native_blocks(dispatch_format="windowed")`, preserves
+the bounded packed leaves but shrinks page directories for nonzero execution
+banks from 256 to 64 pointers. This follows the existing `gb_normalize_bank`
+contract: nonzero identities can only have PC in $4000–$7FFF. Lookup subtracts
+0x40 from the page index in that case. Bank zero keeps all 256 pointers,
+including MBC5 upper bank zero and ordinary fixed-ROM/RAM-code pages. The
+shared empty bank retains its full directory, so missing identities still trap.
+Malformed noncanonical identities fail with an error rather than losing code.
+
+`build` tries this after bounded leaves and before reducing scheduler quotas.
+Later layout retries preserve `bank_page_table_24_windowed` and optimization
+options; assembler convergence retries reuse the generated assembly. Fitting
+older layouts are unchanged. `dispatch_windowed_table_bytes` reports the
+candidate metadata size, and `dispatch_table_bytes` reports the selected one.
+The new lookup still uses scratch D0/D1/A0 only; scheduler D7, CPU/peripheral
+semantics and every compiled entry remain intact. Extra lookup instructions
+and different retained quotas mean this is not a universal speed guarantee.
+
+Original fixtures in `tests/test_prescaled_tables.py` exercise index ordering,
+byte offsets, wraparound, physical banks, changed opcodes, scan boundaries and
+native execution. `tests/test_windowed_dispatch.py` covers exact directory
+savings, capacity retry options, noncanonical identities, highest upper-window
+pages, MBC5 bank zero, IRQs, odd/high addresses and missing-entry diagnostics.

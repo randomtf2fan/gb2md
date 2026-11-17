@@ -23,7 +23,7 @@ def build(source,out,steps=100000,color_profile="green",input_scripts=(),auto_st
     out.mkdir(parents=True,exist_ok=True); rom_data=source.read_bytes(); scenarios=[parse_input_script(s) if isinstance(s,str) else s for s in input_scripts];blocks=compile_trace(source,out,steps,scenarios,auto_steps,auto_max_steps,auto_chunk_steps,auto_plateau_chunks,auto_min_new_blocks,auto_inputs,input_max_branches,input_max_depth,input_branch_steps,input_max_steps,input_hold_frames,input_snapshot_interval_frames,input_max_snapshots,input_bridge_states_per_depth,input_sweep_steps,test_serial,coverage_profiles=coverage_profiles)
     if not optimize_pure_chains or not optimize_hram:
         codegen=json.loads((out/'native-codegen-report.json').read_text())
-        emit_native_blocks(blocks,out,dispatch_format={'bank_page_table':'paged','bank_page_table_24':'packed','bank_page_table_24_trimmed':'trimmed'}.get(codegen['dispatch_format'],'tree'),
+        emit_native_blocks(blocks,out,dispatch_format={'bank_page_table':'paged','bank_page_table_24':'packed','bank_page_table_24_trimmed':'trimmed','bank_page_table_24_windowed':'windowed'}.get(codegen['dispatch_format'],'tree'),
                            max_hot_chains=codegen.get('hot_chain_limit'),include_block_table=codegen.get('block_catalog_included',True),optimize_pure_chains=optimize_pure_chains,
                            max_fused_regions=codegen.get('fused_register_region_limit',128),optimize_hram=optimize_hram)
     profile=COLOR_PROFILES[color_profile]
@@ -224,6 +224,13 @@ gb_cart_rom:
                                include_block_table=catalog,optimize_pure_chains=optimize_pure_chains,
                                max_fused_regions=codegen.get('fused_register_region_limit',128),optimize_hram=optimize_hram)
             continue
+        if (codegen.get('dispatch_format')=='bank_page_table_24_trimmed'
+                and codegen.get('dispatch_windowed_table_bytes',codegen['dispatch_table_bytes'])<codegen['dispatch_table_bytes']):
+            print('Native image exceeds 4 MiB; bounding nonzero bank directories to the normalized upper ROM window (all native blocks retained).',flush=True)
+            emit_native_blocks(blocks,out,dispatch_format='windowed',max_hot_chains=codegen.get('hot_chain_limit'),
+                               include_block_table=catalog,optimize_pure_chains=optimize_pure_chains,
+                               max_fused_regions=codegen.get('fused_register_region_limit',128),optimize_hram=optimize_hram)
+            continue
         if hot<=0:
             raise ValueError(f"native image needs {size:,} bytes, exceeding the supported 4 MiB cartridge window; "
                              "larger Genesis cartridge mapping is not implemented. Existing recompiled.md was preserved.")
@@ -232,7 +239,7 @@ gb_cart_rom:
         # entries. The shared scheduler already implements the same checks.
         limit=hot//2
         print(f'Native image {size:,} bytes exceeds 4 MiB; retrying with {limit} profile-ranked inline scheduler stubs (all blocks retained)',flush=True)
-        emit_native_blocks(blocks,out,dispatch_format={'bank_page_table':'paged','bank_page_table_24':'packed','bank_page_table_24_trimmed':'trimmed'}.get(codegen.get('dispatch_format'),'auto'),max_hot_chains=limit,include_block_table=catalog,optimize_pure_chains=optimize_pure_chains,
+        emit_native_blocks(blocks,out,dispatch_format={'bank_page_table':'paged','bank_page_table_24':'packed','bank_page_table_24_trimmed':'trimmed','bank_page_table_24_windowed':'windowed'}.get(codegen.get('dispatch_format'),'auto'),max_hot_chains=limit,include_block_table=catalog,optimize_pure_chains=optimize_pure_chains,
                            max_fused_regions=codegen.get('fused_register_region_limit',128),optimize_hram=optimize_hram)
     image.extend(bytes(size-len(image)))
     struct.pack_into(">I",image,0x1A4,size-1)

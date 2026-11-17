@@ -1,5 +1,51 @@
 # GB2MD compatibility status
 
+## Prepared byte-offset tables and bank-window directories — 2026-11-17
+
+The compiler now recognizes an inline ROM word lookup whose byte index was
+prepared before loading HL. The exact zero-extended BC lookup is required;
+aligned candidates remain bounded by bank/window checks, 128entries, a minimum
+of two valid pointers and the first forward code candidate. It does not invent
+a return address for a plain `JP (HL)` or assume all odd-offset paths covered.
+No game title, hash or individual game address is a compilation rule.
+
+Reusing the prior private battle profile, with just two fresh trace steps,
+now discovers all 24 previously reference-observed Tail Whip instructions
+**without importing that continuation**. The generic table adds other effects
+too: 43,308entries versus 41,625 before. This is improved static discovery, not
+proof that an ordinary fresh GUI trace covers the whole game.
+
+That coverage nearly exhausted the cartridge window: the bounded-leaf layout
+had only 158bytes spare and retained 34 fast scheduler stubs. A further capacity
+fallback uses 64 page pointers for nonzero normalized execution banks, which
+can only have PCs in $4000–$7FFF. Bank zero keeps 256 pointers, including MBC5
+upper bank zero and fixed-ROM/RAM code. Missing entries still trap and invalid
+noncanonical identities are rejected. All discovered code is retained.
+
+For this graph it saves 22,272 table bytes, retaining 275 fast scheduler stubs.
+The image is 4,193,088bytes with 1,216bytes headroom. The 4 MiB limit remains a
+near-term concern; this is not a universal speed improvement. Fitting older
+layouts remain unchanged. CLI and GUI use the same builder automatically.
+
+Validation completed:
+
+- **237/237 native-enabled method results PASS** in the first run, including
+  original pre-scaled/byte-index, bank, boundary and negative fixtures.
+  Both child batches exited 0; the outer tool launcher later reported SIGTERM
+  after all passing records were saved, so a clean outer exit is not claimed.
+- **43/43 selected fixtures PASS in fresh Python and forced-windowed native
+  execution** (14 instruction timing, 14 timer/reg_f, 5 control, 10 survey cases).
+  The native protocol launcher exited 0.
+- Fast suites: **200 PASS / 37 native-only skips**, private and public copies.
+- Preserved-coverage Tetris backend output is byte-identical to ca61322a.
+
+The fresh native Pokémon replay is still in progress. Starter inspection has
+rendered correctly without traps so far; the formerly blocked effect and
+battle completion are not yet native-verified at this reporting point.
+Speed, complete rendering, saves, hardware and general automatic script
+coverage remain incomplete. Commercial artifacts/profiles remain private.
+
+
 ## Bounded native dispatch capacity — 2026-11-16
 
 Extending the private reference route through starter selection and rival battle
