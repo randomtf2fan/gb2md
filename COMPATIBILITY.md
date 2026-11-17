@@ -39,11 +39,16 @@ Validation completed:
 - Fast suites: **200 PASS / 37 native-only skips**, private and public copies.
 - Preserved-coverage Tetris backend output is byte-identical to ca61322a.
 
-The fresh native Pokémon replay is still in progress. Starter inspection has
-rendered correctly without traps so far; the formerly blocked effect and
-battle completion are not yet native-verified at this reporting point.
-Speed, complete rendering, saves, hardware and general automatic script
-coverage remain incomplete. Commercial artifacts/profiles remain private.
+A fresh native Pokémon replay verified starter acquisition, Scratch and the
+formerly blocked enemy Tail Whip path. It displays “But, it failed!”; dismissing
+that message returns to Fight, and another Scratch is accepted. The following
+effect hits a different missing animation callback, absent from the compiled
+graph and independently predicted by Python tracing. There were 250 clean
+observations before the trap at 292,572 Genesis frames; the driver exited 0.
+This verifies continuation past the previous trap, not complete battle or
+correct stat/animation semantics. Speed, complete rendering, saves, hardware
+and fresh automatic GUI coverage remain incomplete. Commercial artifacts and
+profiles remain private. Next: bounded tagged-record callback discovery.
 
 
 ## Bounded native dispatch capacity — 2026-11-16
