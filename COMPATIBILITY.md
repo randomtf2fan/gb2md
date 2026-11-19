@@ -1,5 +1,39 @@
 # GB2MD compatibility status
 
+
+## Collection-wide test validation — 2026-11-19
+
+See [TEST_ROM_RESULTS.md](TEST_ROM_RESULTS.md) for budgets, model exclusions,
+per-suite totals and reproducible commands. All4510 ROMs were inventoried;
+all5100 fixture files remained unchanged. This is a latest-measurement matrix
+with multiple budgets, not one uniform run or full compatibility claim.
+
+- Python:326PASS,331FAIL,64TIMEOUT,1993UNSUPPORTED,1796NOT_RUN.
+- Native:49PASS,4FAIL across53 observed ROMs;4457NOT_RUN.
+- GBMicrotest's newly observed513 ROMs:208PASS/273FAIL/32TIMEOUT in Python.
+- All11 individual Blargg CPU ROMs and both combined memory-timing ROMs pass
+  in Python. The combined CPU ROM instead reaches unsupported opcode$10 in
+  WRAM, also with the previous palette state; root cause remains unresolved.
+- Native `halt_op_dupe` fails (1 instead of2) while Python passes. Native HALT
+  lowering lacks the reference's fetch-duplication behavior. This is a general
+  CPU priority, separate from missing trace coverage.
+- Three sampled PPU tests fail identically in Python/native; their precise
+  hardware-model causes need investigation. Mooneye bank tests fail broadly.
+
+Fixed a reference/native startup mismatch: Python's BGP now starts at$FC,
+matching the documented DMG state and existing native startup. Fresh tests pass
+on both sides. No native runtime, CPU instruction, timer, DMA or PPU change was
+made. The runner now observes GBMicrotest FF82 with a24-source-frame floor,
+excludes Mooneye manual/tools/non-DMG model tests, and avoids inferring a DMA
+cause from activity alone.
+
+Unit validation:215PASS/41native-only skips (256methods) in both copies;
+focused protocol suite7/7PASS with native testing enabled. Existing43native
+compatibility regressions PASS. Tetris preserved-coverage backend remains
+byte-identical to ca61322a;13 protected checkpoint hashes remain intact.
+No new game playthrough, hardware test or speed milestone is claimed.
+
+
 ## Tagged callback discovery — 2026-11-19
 
 A new general recognizer proves a DE-based three-byte tag/pointer search and

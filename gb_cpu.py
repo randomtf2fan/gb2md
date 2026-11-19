@@ -64,6 +64,7 @@ class Memory:
         self.oam = bytearray(0xA0); self.hram = bytearray(0x7F); self.io = bytearray(0x80)
         self.ie = 0
         self.io[0] = 0xCF  # FF00: no buttons pressed after the DMG boot ROM
+        self.io[0x47] = 0xFC  # DMG post-boot BGP, matching the native startup.
         # FF04 exposes the upper byte of this internal divider. TIMA clocks on
         # falling edges of a TAC-selected divider bit.
         self.div_counter = 0

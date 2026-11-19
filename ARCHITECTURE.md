@@ -1229,3 +1229,19 @@ after available table layouts and before halving hot-stub quotas. Reports
 record the option and byte savings; retries retain the setting. Ordinary
 fitting builds keep their previous assembly. No shared scheduler, clocks or
 peripheral implementation changes are needed.
+
+
+## GBMicrotest observation and broad collection reports
+
+`run_compat_tests.protocol_for()` selects `gbmicro_hram` for this test suite.
+`gbmicro_result()` accepts only the documented FF82 flag:1 for PASS,255 for
+FAIL; FF80/FF81 are diagnostics and can agree on a failing test. Both reference
+and native observation require `GBMICRO_OBSERVE_CYCLES` (24 times70224 source
+T-cycles) before accepting a result, covering the documented delayed IF test.
+The reference idle-loop detector waits for that floor. Native observation reads
+the mapped HRAM flag and source-clock counter, prioritizing missing-block
+traps. Host acceleration never replaces this emulated-clock requirement.
+Unsupported visual/audio protocols remain NOT_RUN. Broader collection results
+are summarized in TEST_ROM_RESULTS.md; per-ROM raw reports and binaries stay
+private. Memory.__init__ now starts BGP atFC, matching the already established
+native initialization. This does not complete all DMG boot-state behavior.

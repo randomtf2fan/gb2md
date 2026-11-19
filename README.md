@@ -202,7 +202,8 @@ the requested GB bank and PC remain at `$FF0000` and `$FF0002`.
 ## Compatibility testing
 
 `run_compat_tests.py` recursively discovers the immutable ROM fixtures under
-`test_roms/`, recognizes Blargg serial and Mooneye register protocols, applies
+`test_roms/`, recognizes Blargg serial, Mooneye register and GBMicrotest RAM
+protocols, applies
 instruction/frame limits, and writes machine-readable JSON outside the fixture
 tree. Python and native Genesis results are deliberately separate.
 
@@ -213,9 +214,9 @@ python3 run_compat_tests.py test_roms/mooneye-test-suite/acceptance/timer \
   --max-steps 1000000 --json compat-results/mooneye-timer.json
 ```
 
-An opt-in native stage compiles Python-passing fixtures. For Mooneye protocols,
-it can open BlastEm, inspect the terminal source loop and emulated GB registers,
-and close the emulator automatically:
+An opt-in native stage compiles Python-passing fixtures. It can open BlastEm,
+inspect supported register, serial or GBMicrotest RAM protocols, and close
+the emulator automatically:
 
 ```sh
 python3 run_compat_tests.py test_roms/mooneye-test-suite/acceptance/bits/reg_f.gb \
@@ -224,6 +225,11 @@ python3 run_compat_tests.py test_roms/mooneye-test-suite/acceptance/bits/reg_f.g
 ```
 
 Current measured results and limitations are in [COMPATIBILITY.md](COMPATIBILITY.md).
+The broader collection snapshot is [TEST_ROM_RESULTS.md](TEST_ROM_RESULTS.md).
+GBMicrotest requires at least24 simulated source frames before its RAM flag
+is accepted; use `--suite gbmicrotest --max-steps 1000000 --max-frames 24`.
+Native observation also enforces this source-clock floor. Increase the native
+frame budget if it times out before reaching it.
 
 ### Original homebrew diagnostic
 
@@ -378,7 +384,8 @@ game data, and trademarks remain under their respective owners' terms. See
 or Sega.
 
 For compatibility tests, `run_compat_tests.py --compile-native
---run-native-blastem` now observes supported Mooneye and Blargg serial protocols.
+--run-native-blastem` observes supported Mooneye, Blargg serial and GBMicrotest
+RAM protocols.
 Blargg builds use an explicit diagnostic instantaneous serial peer, not a full
 hardware serial implementation. The standalone `--test-serial` build option is
 for diagnostics only and is disabled in normal builds and the GUI. Finite

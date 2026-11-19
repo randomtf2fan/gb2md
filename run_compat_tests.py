@@ -30,6 +30,9 @@ STATUSES = ("PASS", "FAIL", "TIMEOUT", "UNSUPPORTED", "NOT_RUN")
 ROM_SUFFIXES = {".gb", ".gbc"}
 MOONEYE_PASS = (3, 5, 8, 13, 21, 34)
 MOONEYE_FAIL = (0x42,) * 6
+# Bundled GBMicrotest how-to: most finish in 2 frames; one needs ~380ms.
+# Observe all at 24 source-clock frames, without speeding up CPU execution.
+GBMICRO_OBSERVE_CYCLES = 24 * 70224
 
 
 class ProtocolMemory(SerialTestMemory):
@@ -89,6 +92,10 @@ def protocol_for(path: Path) -> str:
         if any(component in lower for component in ("/cpu_instrs/", "/instr_timing/", "/mem_timing/", "/mem_timing-2/")):
             return "blargg_serial"
         return "manual_visual"
+    if "/gbmicrotest/" in f"/{lower}/":
+        return "gbmicro_hram"
+    if "mooneye-test-suite" in lower and any(f"/{folder}/" in f"/{lower}/" for folder in ("manual-only","utils")):
+        return "manual_visual"
     if "mooneye-test-suite-wilbertpol" in lower:
         return "mooneye_legacy_ed"
     if "mooneye-test-suite" in lower:
@@ -121,6 +128,8 @@ def model_support(path: Path):
         return True, ""
     # G and GS groups include DMG. Standalone S/C/A and explicit non-DMG
     # models do not. Initial-revision dmg0 behavior is intentionally separate.
+    if any(token in name for token in ("-cgb","-agb","-ags")) and "dmg" not in name:
+        return False, "test targets a non-DMG console model"
     if "dmg0" in name:
         return False, "test targets the initial DMG SoC revision"
     if any(token in name for token in ("-sgb", "-sgb2", "-mgb")):
@@ -152,6 +161,19 @@ def terminal_mooneye(cpu: CPU, memory: ProtocolMemory, protocol: str):
             if regs == MOONEYE_FAIL:
                 return "FAIL", "failure register signature ($42 x6)"
             return "FAIL", "terminal breakpoint with an invalid register signature"
+    return None
+
+
+def gbmicro_result(memory):
+    """Read the documented completion flag, never compare actual/expected.
+
+    FF80/FF81 can agree even on failure. The observation floor accommodates
+    the suite's delayed-IF test and prevents accepting a transient early flag.
+    """
+    if memory.cycles < GBMICRO_OBSERVE_CYCLES:return None
+    flag=memory.read(0xFF82)
+    if flag in (0x01,0xFF):
+        return ("PASS" if flag==1 else "FAIL"), f"GBMicrotest result flag ${flag:02X} after observation floor"
     return None
 
 
@@ -243,10 +265,16 @@ def run_python(path: Path, root: Path, max_steps: int, max_frames: int | None,
                     status, detail = terminal
                     category = "protocol"
                     break
+            if protocol == "gbmicro_hram":
+                terminal = gbmicro_result(memory)
+                if terminal:
+                    status, detail = terminal
+                    category = "protocol"
+                    break
             if max_cycles is not None and memory.cycles >= max_cycles:
                 status, category, detail = "TIMEOUT", "frame_limit", f"reached {max_frames} emulated frames"
                 break
-            if same_pc >= loop_threshold:
+            if same_pc >= loop_threshold and (protocol != "gbmicro_hram" or memory.cycles >= GBMICRO_OBSERVE_CYCLES):
                 status, category, detail = "TIMEOUT", "infinite_loop", "PC and ROM bank did not advance"
                 break
     except NotImplementedError as exc:
@@ -258,8 +286,8 @@ def run_python(path: Path, root: Path, max_steps: int, max_frames: int | None,
 
     serial = bytes(memory.serial).decode("ascii", "replace")
     if status == "FAIL" and memory.dma_writes:
-        category = "oam_dma_timing"
-        detail += f"; test started progressive OAM DMA {memory.dma_writes} time(s)"
+        # Starting DMA is evidence of activity, not proof of the failure cause.
+        detail += f"; test started OAM DMA {memory.dma_writes} time(s), cause not established"
     result["python"] = {
         "status": status,
         "category": category,
@@ -279,6 +307,8 @@ def run_python(path: Path, root: Path, max_steps: int, max_frames: int | None,
         "serial_output": serial[-4096:],
         "oam_dma_writes": memory.dma_writes,
     }
+    if protocol == "gbmicro_hram":
+        result["python"]["gbmicro_result"]={"actual":memory.read(0xFF80),"expected":memory.read(0xFF81),"flag":memory.read(0xFF82)}
     return result
 
 
@@ -349,7 +379,8 @@ def run_native_blastem(result, source: Path, blastem: Path, frames: int, timeout
     if native.get("build_status") != "BUILT":
         return
     serial=result["protocol"]=="blargg_serial"
-    if result["protocol"] not in ("mooneye_fibonacci","blargg_serial"):
+    micro=result["protocol"]=="gbmicro_hram"
+    if result["protocol"] not in ("mooneye_fibonacci","blargg_serial","gbmicro_hram"):
         native["detail"] = "native ROM assembled; this protocol has no automated BlastEm observer"
         return
     if serial and not (native.get("build_report") or {}).get("test_serial"):
@@ -362,6 +393,8 @@ def run_native_blastem(result, source: Path, blastem: Path, frames: int, timeout
         "[$ff000e].b [$ff000f].b [$ff0010].w "
         "[$ff0018].l [$ff0038].l [$ff0020].l\nquit\n"
     )
+    if micro:
+        commands=commands.replace("quit\n","p/x [$ff0180].b [$ff0181].b [$ff0182].b\nquit\n")
     if serial:
         addresses=["ffc600.w","ffc602.b"]+[f"{SERIAL_BUFFER_BASE+offset:06x}.l" for offset in range(0,SERIAL_CAPACITY,4)]
         dump="".join("p/x "+" ".join("[$"+address.split('.')[0]+"]."+address.split('.')[1] for address in addresses[start:start+16])+"\n" for start in range(0,len(addresses),16))
@@ -400,6 +433,18 @@ def run_native_blastem(result, source: Path, blastem: Path, frames: int, timeout
         location=f"bank ${bank:04X} PC ${pc:04X}" if bank is not None and pc is not None else "unknown bank/PC"
         native.update(status="FAIL",category="missing_native_block",
                       detail=f"Missing native block at {location}; increase trace/discovery coverage")
+    elif micro:
+        cycles=values.get("FF0020.l")
+        flag=values.get("FF0182.b")
+        native["gbmicro_result"]={"actual":values.get("FF0180.b"),"expected":values.get("FF0181.b"),"flag":flag}
+        if cycles is None or flag is None:
+            native.update(status="FAIL",category="observer",detail="Missing GBMicrotest clock/result observation")
+        elif cycles < GBMICRO_OBSERVE_CYCLES:
+            native.update(status="TIMEOUT",category="protocol",detail="GBMicrotest observation floor not reached; increase native frames")
+        elif flag in (1,255):
+            native.update(status="PASS" if flag==1 else "FAIL",category="protocol",detail=f"Native GBMicrotest result flag ${flag:02X}")
+        else:
+            native.update(status="TIMEOUT",category="protocol",detail="No valid GBMicrotest result flag within frame limit")
     elif serial:
         if count is None or count>SERIAL_CAPACITY or count>len(raw) or values.get(SERIAL_OVERFLOW_ADDRESS) is None:
             native.update(status="FAIL",category="observer",detail="Missing or invalid diagnostic serial buffer")
