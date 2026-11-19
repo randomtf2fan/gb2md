@@ -50,14 +50,17 @@ class WindowedDispatchTests(unittest.TestCase):
             rom[0x105:0x10B]=bytes.fromhex('c20020c3f87f');rom[0x2200]=0xC9
             source.write_bytes(rom);assembler=root/'assembler';assembler.touch();calls=[]
             def assemble(command,**kwargs):
-                calls.append(command);Path(command[-1]).write_bytes(bytes(0x400002 if len(calls)<6 else 0x80000))
+                calls.append(command);Path(command[-1]).write_bytes(bytes(0x400002 if len(calls)<7 else 0x80000))
             with patch.object(compiler,'compile_trace',wraps=compiler.compile_trace) as discovered,patch.object(compiler.subprocess,'run',side_effect=assemble):
                 compiler.build(source,root/'out',20,assembler=assembler,optimize_hram=False,optimize_pure_chains=False)
             attempts=json.loads((root/'out/build-report.json').read_text())['native_layout_attempts']
             self.assertEqual(discovered.call_count,1)
-            self.assertEqual([a['dispatch_format'] for a in attempts],['bank_page_table','bank_page_table','bank_page_table_24','bank_page_table_24_trimmed','bank_page_table_24_windowed','bank_page_table_24_windowed'])
+            self.assertEqual([a['dispatch_format'] for a in attempts],['bank_page_table','bank_page_table','bank_page_table_24','bank_page_table_24_trimmed','bank_page_table_24_windowed','bank_page_table_24_windowed','bank_page_table_24_windowed'])
             self.assertEqual(attempts[3]['hot_chain_targets'],attempts[4]['hot_chain_targets'])
-            self.assertLess(attempts[5]['hot_chain_targets'],attempts[4]['hot_chain_targets'])
+            self.assertEqual(attempts[5]['hot_chain_targets'],attempts[4]['hot_chain_targets'])
+            self.assertTrue(attempts[5]['compact_bank_immediates'])
+            self.assertTrue(attempts[6]['compact_bank_immediates'])
+            self.assertLess(attempts[6]['hot_chain_targets'],attempts[5]['hot_chain_targets'])
             stats=json.loads((root/'out/native-codegen-report.json').read_text())
             self.assertFalse(stats['optimize_hram']);self.assertFalse(stats['optimize_pure_chains'])
             self.assertFalse(stats['block_catalog_included'])

@@ -1198,3 +1198,34 @@ byte offsets, wraparound, physical banks, changed opcodes, scan boundaries and
 native execution. `tests/test_windowed_dispatch.py` covers exact directory
 savings, capacity retry options, noncanonical identities, highest upper-window
 pages, MBC5 bank zero, IRQs, odd/high addresses and missing-entry diagnostics.
+
+
+## Tagged callback records and compact bank arguments
+
+`tagged_callback_table()` recognizes a bounded DE-based search over three-byte
+records: tag, target low byte, target high byte. It requires the actual
+comparison and stride-three loop, the matching script-byte conditional branch,
+and a callback path that saves HL, reads the ROM pointer, pushes a literal
+return address and jumps through HL. The literal return must restore HL and
+branch back to a script fetch. All addresses are decoded operands. No title,
+ROM hash or game address selects the analysis. Unknown upper-bank context,
+changed search/stack operations, duplicate tags and invalid pointers fail
+closed. Candidates stop at the compared sentinel, a forward code boundary,
+ROM window/file boundary or the configurable analysis entry cap (default128).
+At least two records are needed. This narrowly recognized idiom is coverage
+analysis; it is not a proof of all indirect control flow or odd record layouts.
+
+`compile_trace()` merges the callback and synthetic return roots into normal
+static closure, reporting `tagged_callback_tables`, `tagged_callback_targets`
+and `tagged_callback_returns`. Original lookup instructions still execute in
+the native ROM. An unrecognized computed target continues to trap.
+
+`emit_native_blocks(compact_bank_immediates=True)` can encode bank arguments
+0..127 in compact scheduler stubs using two-byte `MOVEQ` instead of four-byte
+`MOVE.W`. D1 is scratch and the shared scheduler consumes the low bank word;
+128 and larger retain the original word encoding to avoid sign extension.
+The builder enables this only as a capacity retry for images exceeding4MiB,
+after available table layouts and before halving hot-stub quotas. Reports
+record the option and byte savings; retries retain the setting. Ordinary
+fitting builds keep their previous assembly. No shared scheduler, clocks or
+peripheral implementation changes are needed.

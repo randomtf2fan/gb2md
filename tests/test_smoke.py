@@ -466,7 +466,7 @@ class SmokeTest(unittest.TestCase):
                 calls.append(command);pathlib.Path(command[-1]).write_bytes(bytes(0x400002))
             with patch.object(compiler.subprocess,'run',side_effect=assemble):
                 with self.assertRaisesRegex(ValueError,'4 MiB'):compiler.build(source,out,15,assembler=assembler)
-            self.assertEqual(len(calls),4) #catalog omission, then3 ->1 ->0 scheduler stubs
+            self.assertEqual(len(calls),5) # Catalog omission, 3 -> 1 -> 0 stubs, and bank encoding.
             self.assertEqual(binary.read_bytes(),b'preserved')
 
     def test_bank_context_closure_discovers_following_call(self):

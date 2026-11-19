@@ -42,7 +42,8 @@ class PackedDispatchTests(unittest.TestCase):
             self.assertEqual([x['block_catalog_included'] for x in a],[True,False,False,False,False])
             self.assertEqual(a[0]['hot_chain_targets'],a[2]['hot_chain_targets'])
             self.assertEqual(a[3]['hot_chain_targets'],a[2]['hot_chain_targets'])
-            self.assertLess(a[4]['hot_chain_targets'],a[3]['hot_chain_targets'])
+            self.assertEqual(a[4]['hot_chain_targets'],a[3]['hot_chain_targets'])
+            self.assertTrue(a[4]['compact_bank_immediates'])
             stats=json.loads((root/'out/native-codegen-report.json').read_text())
             self.assertFalse(stats['optimize_hram']);self.assertFalse(stats['optimize_pure_chains'])
 

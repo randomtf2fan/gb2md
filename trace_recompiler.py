@@ -341,6 +341,67 @@ def hl_dispatch_table(rom,bank,pc,diagnostics=None):
         else:return None
     return None
 
+def tagged_callback_table(rom,bank,pc,max_entries=128,diagnostics=None):
+    """Discover bounded tag/lo/hi records consumed by a preserving callback.
+
+    Prove the DE stride-three search, conditional script-byte dispatch, HL
+    save/restore and literal synthetic return. This adds coverage only; live
+    code still performs the lookup. Unknown upper-window mappings fail closed.
+    """
+    if len(rom)<=0x147 or not 0<=pc<0x8000 or not 2<=max_entries<=256:return []
+    def key(address):
+        if 0x100<=address<0x4000:return (0,address)
+        if 0x4000<=address<0x8000:
+            if pc>=0x4000:return (bank,address)
+            if rom[0x147] in (0,8,9):return (1,address)
+        return None
+    def read(address,size):
+        if not 0<=address<0x8000 or address+size>(0x4000 if address<0x4000 else 0x8000):return None
+        if address<0x4000:offset=address
+        else:
+            target=key(address)
+            if target is None:return None
+            offset=target[0]*0x4000+address-0x4000
+        return rom[offset:offset+size] if 0<=offset and offset+size<=len(rom) else None
+    head=read(pc,17)
+    if not head or head[0]!=0x11 or head[3:12]!=bytes.fromhex('1ab9280513131318f7'):return []
+    # Match advances DE only through nonmatching records. A matching record
+    # reads a script byte, and takes this forward branch to the callback only
+    # for the compared sentinel. The other branch need not preserve mapping.
+    if head[12:14]!=bytes.fromhex('2afe') or head[15]!=0x28 or head[16]>=128:return []
+    callback=pc+17+head[16];body=read(callback,12)
+    if not body or body[:8]!=bytes.fromhex('e5131a6f131a6711') or body[10:]!=bytes.fromhex('d5e9'):return []
+    return_pc=body[8]|body[9]<<8;epilogue=read(return_pc,3)
+    if not epilogue or epilogue[:2]!=bytes.fromhex('e118'):return []
+    delta=epilogue[2]-256 if epilogue[2]&128 else epilogue[2]
+    stream=return_pc+3+delta
+    if not pc-64<=stream<pc or read(stream,1)!=b'\x2a':return []
+    # Keep the matched instruction sequence, callback and epilogue within the
+    # original execution window, proving one stable physical mapping.
+    high=0x4000 if pc<0x4000 else 0x8000
+    if callback+12>high or return_pc<pc or return_pc+3>high:return []
+    table=head[1]|head[2]<<8;end=0x4000 if table<0x4000 else 0x8000
+    targets=[];tags=set();code_end=end;stop='entry_limit'
+    for index in range(max_entries):
+        address=table+3*index
+        if address>=code_end:stop='code_boundary';break
+        tag=read(address,1)
+        if not tag:stop='table_boundary';break
+        if tag[0]==head[14]:stop='sentinel';break
+        record=read(address,3)
+        if not record or address+3>code_end:stop='table_boundary';break
+        if record[0] in tags:return []
+        target=record[1]|record[2]<<8;target_key=key(target);opcode=read(target,1)
+        if target_key is None or not opcode or family(opcode[0]) in ('INVALID','STOP'):return []
+        if table<=target<end:code_end=min(code_end,target)
+        if address+3>code_end:return []
+        tags.add(record[0]);targets.append(target_key)
+    if len(targets)<2:return []
+    if diagnostics is not None:
+        diagnostics.update(bank=bank,pc=pc,table=table,callback=callback,
+            return_address=return_pc,entries=len(targets),entry_limit=max_entries,stop_reason=stop)
+    return list(dict.fromkeys(targets))
+
 def inline_bc_call_table(rom,bank,pc,diagnostics=None):
     """Recognize a byte-offset BC lookup followed by a synthetic return call.
 
@@ -940,6 +1001,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
     ram_callback_targets=set();ram_callback_returns=set();ram_callback_report={}
     indexed_call_targets=set();indexed_call_returns=set();indexed_call_reports=[];inline_offset_tables=[]
     inline_bc_targets=set();inline_bc_returns=set();inline_bc_tables=[]
+    tagged_targets=set();tagged_returns=set();tagged_tables=[]
     analyzed_size=-1;warned_contexts=set();warned_pair_limit=False
     while frontier or analyzed_size!=len(first):
         if not frontier:
@@ -1005,6 +1067,17 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
         elif fam not in ("RET","RETI","JP_HL","HALT","STOP","INVALID","UNCLASSIFIED"):
             successors=[fall]
         for address in successors:add_rom_block(rom_key(key,address))
+        if op==0x11:
+            tagged_diagnostic={}
+            for target_key in tagged_callback_table(rom,bank,pc,diagnostics=tagged_diagnostic):
+                add_rom_block(target_key)
+                if target_key in first:tagged_targets.add(target_key)
+            if tagged_diagnostic:
+                return_key=rom_key(key,tagged_diagnostic['return_address']);add_rom_block(return_key)
+                if return_key in first:tagged_returns.add(return_key)
+                tagged_tables.append(tagged_diagnostic)
+                if tagged_diagnostic['stop_reason']=='entry_limit':
+                    print(f"warning: tagged callback table at ${bank:02X}:${pc:04X} reached its discovery limit",flush=True)
         if op==0x06:
             inline_diagnostic={};table=inline_bc_call_table(rom,bank,pc,inline_diagnostic)
             if table is not None:
@@ -1134,11 +1207,11 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
                 block["idle_wait"]=True
     for block in blocks:block["native_lowered"]=native_body(block) is not None
     out.mkdir(parents=True,exist_ok=True)
-    (out/"trace-profile.json").write_text(json.dumps({"input":str(rom_path),"source_sha256":hashlib.sha256(rom).hexdigest(),"coverage_imports":coverage_imports,"fresh_dynamic_unique_block_count":fresh_dynamic_unique_block_count,"steps_per_scenario":steps,"auto_steps":auto_steps,"auto_inputs":auto_inputs,"test_serial":test_serial,"total_steps_executed":sum(s["steps_executed"] for s in scenario_reports),"dynamic_unique_blocks":dynamic_unique_block_count,"indirect_table_targets":len(indirect_table_targets),"hl_pointer_table_targets":len(hl_table_targets),"inline_byte_offset_tables":inline_offset_tables,"bitmask_dispatch_targets":len(bitmask_targets),"rst_inline_table_targets":len(rst_table_targets),"banked_thunk_targets":len(banked_thunk_targets),"constant_bank_call_targets":len(constant_bank_targets),"constant_far_call_targets":len(far_call_targets),"constant_far_call_returns":len(far_call_returns),"banked_pointer_table_targets":len(far_table_targets),"banked_pointer_tables":far_table_reports,"bank_context_targets":len(bank_context_targets),"inline_bc_call_targets":len(inline_bc_targets),"inline_bc_call_returns":len(inline_bc_returns),"inline_bc_call_tables":inline_bc_tables,"indexed_call_targets":len(indexed_call_targets),"indexed_call_returns":len(indexed_call_returns),"indexed_call_tables":indexed_call_reports,"ram_callback_targets":len(ram_callback_targets),"ram_callback_returns":len(ram_callback_returns),"ram_callback_records":ram_callback_report.get("records",[]),"ram_callback_analysis_limits":{"pair_limit_reached":ram_callback_report.get("pair_limit_reached",False),"exhausted_contexts":ram_callback_report.get("exhausted_contexts",[])},"total_blocks_after_static_closure":len(blocks),"input_exploration":exploration_report,"scenarios":scenario_reports,"blocks":blocks},indent=2)+"\n")
+    (out/"trace-profile.json").write_text(json.dumps({"input":str(rom_path),"source_sha256":hashlib.sha256(rom).hexdigest(),"coverage_imports":coverage_imports,"fresh_dynamic_unique_block_count":fresh_dynamic_unique_block_count,"steps_per_scenario":steps,"auto_steps":auto_steps,"auto_inputs":auto_inputs,"test_serial":test_serial,"total_steps_executed":sum(s["steps_executed"] for s in scenario_reports),"dynamic_unique_blocks":dynamic_unique_block_count,"indirect_table_targets":len(indirect_table_targets),"hl_pointer_table_targets":len(hl_table_targets),"inline_byte_offset_tables":inline_offset_tables,"tagged_callback_targets":len(tagged_targets),"tagged_callback_returns":len(tagged_returns),"tagged_callback_tables":tagged_tables,"bitmask_dispatch_targets":len(bitmask_targets),"rst_inline_table_targets":len(rst_table_targets),"banked_thunk_targets":len(banked_thunk_targets),"constant_bank_call_targets":len(constant_bank_targets),"constant_far_call_targets":len(far_call_targets),"constant_far_call_returns":len(far_call_returns),"banked_pointer_table_targets":len(far_table_targets),"banked_pointer_tables":far_table_reports,"bank_context_targets":len(bank_context_targets),"inline_bc_call_targets":len(inline_bc_targets),"inline_bc_call_returns":len(inline_bc_returns),"inline_bc_call_tables":inline_bc_tables,"indexed_call_targets":len(indexed_call_targets),"indexed_call_returns":len(indexed_call_returns),"indexed_call_tables":indexed_call_reports,"ram_callback_targets":len(ram_callback_targets),"ram_callback_returns":len(ram_callback_returns),"ram_callback_records":ram_callback_report.get("records",[]),"ram_callback_analysis_limits":{"pair_limit_reached":ram_callback_report.get("pair_limit_reached",False),"exhausted_contexts":ram_callback_report.get("exhausted_contexts",[])},"total_blocks_after_static_closure":len(blocks),"input_exploration":exploration_report,"scenarios":scenario_reports,"blocks":blocks},indent=2)+"\n")
     emit_native_blocks(blocks,out)
     return blocks
 
-def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,include_block_table=True,optimize_pure_chains=True,max_fused_regions=128,optimize_hram=True):
+def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,include_block_table=True,optimize_pure_chains=True,max_fused_regions=128,optimize_hram=True,compact_bank_immediates=False):
     """Emit validated block metadata without repeating reference discovery."""
     if max_hot_chains is not None and max_hot_chains<0:raise ValueError('negative hot chain limit')
     if max_fused_regions<0:raise ValueError('negative fused region limit')
@@ -1333,7 +1406,11 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
             # the scheduler body without discarding any translated entries.
             # The 68000 return address is the native destination, not a GB
             # interpreter entry. No host temporary except d7 is live here.
-            lines += [f"gb_chain_{stem}:",f"\tmove.w #${target:04X},d0",f"\tmove.w #${bank:04X},d1",
+            # Only scratch D1 is live as a bank argument; the shared helper
+            # consumes its low word. MOVEQ encodes nonnegative signed-byte
+            # constants in two bytes. Larger banks retain the word immediate.
+            bank_load=f"moveq #{bank},d1" if compact_bank_immediates and 0<=bank<=127 else f"move.w #${bank:04X},d1"
+            lines += [f"gb_chain_{stem}:",f"\tmove.w #${target:04X},d0",f"\t{bank_load}",
                       f"\tpea {label(block_by_key[(bank,target)])}","\tjmp gb_chain_compact",""]
             continue
         cost=constant_costs.get((bank,target))
@@ -1464,6 +1541,9 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
     (out/"native-codegen-report.json").write_text(json.dumps({
         "blocks":len(blocks),"chain_targets":len(chain_targets),
         "compact_chain_targets":len(compact_targets),
+        "compact_bank_immediates":compact_bank_immediates,
+        "compact_bank_potential_bytes_saved":2*sum(0<=bank<=127 for bank,pc in compact_targets),
+        "compact_bank_bytes_saved":2*sum(0<=bank<=127 for bank,pc in compact_targets) if compact_bank_immediates else 0,
         "hot_chain_targets":len(chain_targets)-len(compact_targets),
         "hot_chain_limit":max_hot_chains,
         "optimize_pure_chains":optimize_pure_chains,

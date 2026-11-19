@@ -1,5 +1,58 @@
 # GB2MD compatibility status
 
+## Tagged callback discovery — 2026-11-19
+
+A new general recognizer proves a DE-based three-byte tag/pointer search and
+its preserving callback/return sequence. It adds coverage for matching ROM
+records without changing live lookup, stack, banking, CPU or peripheral behavior.
+Original synthetic tests cover different tags, source banks, mapping uncertainty,
+callback operands, malformed sequences, duplicates, boundaries and budgets.
+
+The private incremental battle profile grows from 43,308 to 43,997 entries;
+every old entry is retained. The previously missing animation callback is now
+included. This does not establish complete battle coverage: a further Python
+replay already predicts another missing prepared-index lookup variant.
+No reference continuation was imported to obtain the new coverage.
+
+The expanded image first failed the 4 MiB bound at 4,217,362 bytes even with
+all shared scheduler stubs. A capacity-only encoding retry uses MOVEQ for
+nonnegative signed-byte bank arguments in scratch D1, retaining word loads for
+larger banks. It saves 77,108 bytes on the fitting candidate, which retains
+550 hot scheduler stubs and all discovered code. Image size: 4,189,250 bytes,
+5,054 bytes headroom. Ordinary fitting builds keep their previous assembly.
+CLI and GUI share this builder automatically; no new GUI option is required.
+
+Fast suites: 249 methods, **209 PASS / 40 native-only skips** in private and
+public copies. Preserved-coverage Tetris remains byte-identical to ca61322a.
+**249/249 native-enabled unit method results PASS**, after one unchanged retry
+for an archived BlastEm host-JIT startup error (before guest execution).
+Both child batches exited 0; the outer tool reported SIGTERM after results
+were saved. **43/43 selected fixtures PASS in fresh Python and forced-windowed
+native execution**; that child launcher also exited 0, with a later outer-tool
+SIGTERM. These fixtures cover instruction timing, timers, register flags,
+interrupt/control and memory timing; they are not every downloaded test ROM.
+
+Fresh native boot, starter acquisition and four Scratch exchanges completed.
+Enemy Tackle changed player HP; Tail Whip failure messages dismissed back to
+Fight. Selecting Growl then hit a missing entry at bank $1E:$50BC, with marker
+BADB10C0/counter1, first observed at 335,872 Genesis frames. The requested entry
+is absent from the graph. A separate input-driven Python replay reaches that
+same target as its first uncovered entry: a helper-based tagged lookup with a
+synthetic return, distinct from the inline DE search recognized in this fix.
+The native driver exited 0; 325 clean observations preceded the trap.
+
+The formerly missing inline callback is now compiled, and original synthetic
+ROMs verify that lookup natively; this commercial-game route does not establish
+that the specific former callback executed. The separate Python-predicted
+prepared-BC lookup gap remains unresolved. Full battles, all effects, normal
+fresh GUI coverage, saves and physical hardware remain unverified.
+
+Two mixed battle/text spans measured 4.09 and 3.53 simulated GB clock frames/s,
+normalized to 60 Genesis frames/s using source-cycle deltas. These are not
+host display FPS or a controlled before/after comparison. Performance remains
+poor; this session establishes no speed milestone. Protected prior artifacts
+remain intact, and all commercial ROMs, profiles and captures remain private.
+
 ## Prepared byte-offset tables and bank-window directories — 2026-11-17
 
 The compiler now recognizes an inline ROM word lookup whose byte index was
