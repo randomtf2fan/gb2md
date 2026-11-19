@@ -1,6 +1,23 @@
 # GB2MD compatibility status
 
 
+
+## Reduced HALT-fetch regression — 2026-11-19 follow-up
+
+Three original probes now isolate the native HALT failure. The NOP control
+passes; the one-byte and immediate-operand HALT cases fail natively with no
+missing-block trap. Reference fetch history shows both duplicated opcode
+fetching and the one-byte-shorter PC advance. Current traces can record bugged
+immediate bytes, but ordinary lowering advances PC by the full instruction
+length, skipping an exposed instruction. This needs context-sensitive native
+entries and correct PC semantics, not a test/game patch.
+
+No compiler/CPU/runtime change was made. The full fast suites pass218methods,
+with41native-only skips (259total). These probes are separate from the4510
+immutable fixture results; the native failures remain unresolved. See the
+[reproducer and result details](TEST_ROM_RESULTS.md#reduced-halt-fetch-probes--small-follow-up).
+
+
 ## Collection-wide test validation — 2026-11-19
 
 See [TEST_ROM_RESULTS.md](TEST_ROM_RESULTS.md) for budgets, model exclusions,

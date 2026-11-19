@@ -226,6 +226,9 @@ python3 run_compat_tests.py test_roms/mooneye-test-suite/acceptance/bits/reg_f.g
 
 Current measured results and limitations are in [COMPATIBILITY.md](COMPATIBILITY.md).
 The broader collection snapshot is [TEST_ROM_RESULTS.md](TEST_ROM_RESULTS.md).
+`halt_fetch_probe.py --out compat-results/halt-fetch` generates original
+reference probes for the known HALT bug; add `--native --blastem PATH` to
+measure native differences. This diagnostic currently reports native failures.
 GBMicrotest requires at least24 simulated source frames before its RAM flag
 is accepted; use `--suite gbmicrotest --max-steps 1000000 --max-frames 24`.
 Native observation also enforces this source-clock floor. Increase the native

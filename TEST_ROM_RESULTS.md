@@ -123,3 +123,41 @@ comparison while preserving their original Python FAIL status.
 Full per-ROM JSON, logs, native binaries and fixture hashes remain private under
 `compat-results/nov19-collection-matrix.json` and `compat-builds/`. The public
 repository includes only this summary, original source and synthetic tests.
+
+
+## Reduced HALT-fetch probes — small follow-up
+
+`halt_fetch_probe.py` generates three entirely original ROMs; these are separate
+from the4510-ROM collection above. A pending interrupt with IME disabled is
+held constant, with a NOP control and two HALT cases. All programs write a
+completion marker and results to WRAM. No guest-memory debugger writes or
+commercial/test-suite program bytes are used.
+
+| Case | Reference result | Native result | Native status |
+|---|---|---|---|
+| NOP control | B result1 |1 |PASS |
+| HALT then INC B | B result2 |1 |FAIL |
+| HALT then LD A,$04 | B result1,A=$3E | B result0,A=$3E |FAIL |
+
+All three native runs completed with emulator exit0, completion marker$A5 and
+zero missing-block diagnostics. The immediate case demonstrates a second
+problem: the suppressed opcode-PC increment fetches `3E 3E` from physical ROM
+bytes `3E 04`, then executes the exposed `$04` as INC B. The compiler records
+fetched bytes but normally calculates fallthrough as PC+instruction length,
+so it skips that INC. A correct general fix needs a fetch-context representation,
+the adjusted fallthrough/relative-branch/return PCs, and distinct ordinary
+versus bugged execution at the same ROM entry. Merely duplicating one native
+instruction would not implement this behavior correctly.
+
+```sh
+python3 halt_fetch_probe.py --out compat-results/halt-fetch-reference
+# GB2MD_BLASTEM should point to an isolated-display wrapper for unattended use.
+python3 halt_fetch_probe.py --out compat-results/halt-fetch-native --native --blastem "$GB2MD_BLASTEM"
+```
+
+The output directory must be empty or new. JSON records expected/reference/
+native results and reference fetch history. The native command currently exits1
+because two probes fail; those are real failures, not exempted passes. This
+follow-up changes no compiler, CPU or native runtime behavior. Three new
+reference regressions pass; the complete fast suite is218PASS/41native-only
+skips (259methods) in both copies. A native fix remains the next task.

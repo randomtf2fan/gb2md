@@ -1245,3 +1245,16 @@ Unsupported visual/audio protocols remain NOT_RUN. Broader collection results
 are summarized in TEST_ROM_RESULTS.md; per-ROM raw reports and binaries stay
 private. Memory.__init__ now starts BGP atFC, matching the already established
 native initialization. This does not complete all DMG boot-state behavior.
+
+
+## HALT fetch context: reduced unresolved case
+
+`halt_fetch_probe.make_rom()` and `reference()` provide original one-byte,
+immediate-operand and NOP-control examples. Reference `CPU.fetch8()` suppresses
+one opcode-PC increment when `halt_bug` is set. `compile_trace.trace_step()`
+records bytes actually fetched, but its block identity remains (bank,PC), and
+`native_body()` normally computes nextpc as PC+byte-count. The reduced immediate
+probe therefore retains the fetched immediate but advances past an instruction
+that the reference executes. Future work must distinguish normal and bugged
+fetch contexts and handle branch/return PC arithmetic; no such fix is claimed
+by the diagnostic. The ordinary native path and performance remain unchanged.
