@@ -890,7 +890,8 @@ divider falling edge plus remaining TIMA increments and four reload cycles.
 Only LY143 can reach VBlank within200T; STAT conservatively stops at the next
 mode/line boundary under the existing fixed-length PPU model. This is not a
 new PPU model, serial controller, or full bus-accurate peripheral scheduler.
-Native IME0 HALT-bug behavior and other hardware edge cases remain incomplete.
+ROM-backed IME0 HALT fetch suppression is implemented; writable-code fetch
+contexts and other hardware edge cases remain incomplete.
 
 Previously a timer/VBlank request could remain unprocessed in a straight-line
 batch while a later DI disabled IME. Flushing only on entry to DI would still
@@ -1247,14 +1248,46 @@ private. Memory.__init__ now starts BGP atFC, matching the already established
 native initialization. This does not complete all DMG boot-state behavior.
 
 
-## HALT fetch context: reduced unresolved case
+## HALT fetch contexts (2026-11-20)
 
-`halt_fetch_probe.make_rom()` and `reference()` provide original one-byte,
-immediate-operand and NOP-control examples. Reference `CPU.fetch8()` suppresses
-one opcode-PC increment when `halt_bug` is set. `compile_trace.trace_step()`
-records bytes actually fetched, but its block identity remains (bank,PC), and
-`native_body()` normally computes nextpc as PC+byte-count. The reduced immediate
-probe therefore retains the fetched immediate but advances past an instruction
-that the reference executes. Future work must distinguish normal and bugged
-fetch contexts and handle branch/return PC arithmetic; no such fix is claimed
-by the diagnostic. The ordinary native path and performance remain unchanged.
+When IME is clear and an enabled interrupt is already pending at HALT entry,
+the following opcode fetch suppresses one PC increment. This changes immediate
+operands and instruction boundaries as well as single-byte instruction behavior.
+`halt_fetch_probe.make_rom()` and `reference()` provide original minimal examples.
+
+`compile_trace()` keeps the ordinary ROM instruction canonical and records
+separate `halt_fetch_bytes`/`halt_fetch_hits` metadata. `add_halt_fetch()` closes
+the direct successors using the shortened PC advance. `coverage_profiles.py`
+validates both cartridge bytes and the exact duplicated-opcode encoding before
+merging profiles. The ordinary block identity remains `(bank, PC)`; alternate
+fetch semantics use separate native entries, not self-modifying ROM variants.
+
+`native_body()` uses a one-byte-shorter next PC for those entries, including
+relative branches and pushed CALL/RST return addresses. `emit_native_blocks()`
+emits a sparse `gb_halt_dispatch_tree`. Ordinary native dispatch and chains
+have no new fetch-context check. This remains native 68000 code, not an SM83
+interpreter.
+
+`gb_halt_enter` first flushes preceding accumulated source cycles with IRQ
+service and EI advancement deferred. It then samples IE/IF at HALT entry.
+`gb_halt_dispatch` selects ordinary or suppressed-fetch dispatch exactly once.
+For EI/HALT with a pending IRQ, reference `CPU._step_base()` and native IRQ
+entry correct the pushed return PC back to HALT and clear the latch; the IRQ
+handler's first instruction has an ordinary fetch.
+
+Unsupported suppressed fetch in writable code produces an explicit trace error
+or native trap. Missing alternate entries set `gb_missing_fetch_context`
+($FF0081) before the existing missing-block trap; the compatibility runner
+reports `missing_native_fetch_context`. Mixed-window multi-byte suppressed
+fetches are also unsupported. These are limitations, not ordinary block misses.
+
+`tests/test_halt_context.py` covers canonical profile round trips, metadata
+rejection, exposed successors, relative branches, calls, RST, CB instructions,
+mixed normal/bugged execution at one PC, EI/HALT, timer-boundary phases and ROM
+bank/window contexts. Native checks compare register/WRAM and DIV/TIMA results.
+The existing timer/peripheral models otherwise remain unchanged.
+
+A separate production-reference failure remains in SameSuite's EI/HALT ROM:
+VBlank can be requested while LCD is disabled. A private diagnostic gate isolates
+that PPU issue; it is not a production or native PASS. Coordinated LCD timing and
+startup-state work remains necessary.

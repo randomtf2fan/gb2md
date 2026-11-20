@@ -1,5 +1,28 @@
 # Test ROM validation snapshot — 2026-11-19
 
+
+## 2026-11-20 HALT follow-up
+
+The native `halt_op_dupe.gb` failure below is now fixed: fresh Python and
+native execution both report actual 2, expected 2, success flag 1. The three
+original reduced probes also pass natively. The 2026-11-19 tables are historical
+latest-measurement results. Fresh 43-ROM regressions pass in Python and native
+execution. Updating those measurements plus the HALT fixture gives native
+**50 PASS / 3 FAIL / 4457 NOT_RUN** across the same 4510-ROM inventory; the
+three remaining observed native failures are the shared PPU discrepancies.
+This is not a fresh sweep of every ROM, and the Python totals below have not
+been recomputed for the separate SameSuite diagnostic.
+Final unit validation: **267/267 PASS** with native tests enabled, zero
+failures/skips. Fast suites in private/public copies: 224 PASS / 43 native-only
+skips. Both native unit batch processes exit 0. All 43 native protocol emulator
+children exit 0; the outer protocol shell reports 143 after writing complete
+results, so that shell is not claimed to have exited successfully. A fresh
+Python Blargg interrupt ROM also passes; its native result remains NOT_RUN.
+All 5100 fixture files and 13 protected checkpoint hashes remain unchanged.
+
+See [the current HALT status](COMPATIBILITY.md#native-halt-fetch-correction--2026-11-20).
+
+
 This snapshot inventories **4,510 ROMs** across 18 suites. All **5,100 files**
 in the fixture tree were hashed before/after each sweep and remained unchanged.
 No test ROMs were downloaded, modified or redistributed.
@@ -47,13 +70,13 @@ unsupported cartridge cases remain UNSUPPORTED.
 | strikethrough | 1 | 0 | 0 | 0 | 0 | 1 |
 | turtle-tests | 2 | 0 | 0 | 0 | 0 | 2 |
 
-## Established findings
+## Established findings (2026-11-19; HALT superseded above)
 
-- **Native HALT fetch duplication is missing:** GBMicrotest `halt_op_dupe.gb`
+- **Native HALT fetch duplication was missing (fixed 2026-11-20):** GBMicrotest `halt_op_dupe.gb`
   passes in Python (actual2, expected2), but native execution reports actual1,
   expected2 and failure flag255. No missing-block trap is present. Python has
-  `halt_bug` fetch suppression; native HALT lowering currently only sets the
-  halted state. Implementing correct native handling is the next CPU priority;
+  `halt_bug` fetch suppression; native HALT lowering then only set the
+  halted state at that time. Correct native handling was the next CPU priority;
   it must preserve native recompilation, including multi-byte operand/PC effects.
 - **Reference palette initialization corrected:** `poweron_bgp_000.gb` initially
   failed in Python (0 instead of252), while native execution passed. Python
@@ -125,7 +148,7 @@ Full per-ROM JSON, logs, native binaries and fixture hashes remain private under
 repository includes only this summary, original source and synthetic tests.
 
 
-## Reduced HALT-fetch probes — small follow-up
+## Historical reduced HALT-fetch probes — small follow-up
 
 `halt_fetch_probe.py` generates three entirely original ROMs; these are separate
 from the4510-ROM collection above. A pending interrupt with IME disabled is
@@ -160,4 +183,5 @@ native results and reference fetch history. The native command currently exits1
 because two probes fail; those are real failures, not exempted passes. This
 follow-up changes no compiler, CPU or native runtime behavior. Three new
 reference regressions pass; the complete fast suite is218PASS/41native-only
-skips (259methods) in both copies. A native fix remains the next task.
+skips (259methods) in both copies. This historical failure was fixed and
+revalidated on 2026-11-20; see the follow-up above.

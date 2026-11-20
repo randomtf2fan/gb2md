@@ -1,8 +1,43 @@
 # GB2MD compatibility status
 
+## Native HALT fetch correction — 2026-11-20
+
+ROM-backed HALT fetch suppression is now lowered to separate native 68000
+entries. The compiler retains canonical cartridge bytes and validates alternate
+fetch metadata during profile imports. Relative targets, CALL/RST return PCs,
+EI/HALT interrupt return addresses and timer-boundary sampling are covered by
+original regression programs. Ordinary dispatch and pure chains remain unchanged.
+No game-specific translation, interpreter or arbitrary clock multiplier was added.
+
+The original three reduced probes pass in Python and native execution.
+GBMicrotest `halt_op_dupe.gb` now passes on both sides: actual 2, expected 2,
+success flag 1, no missing-block marker. Writable-code suppressed fetch and
+mixed-window multi-byte fetch contexts remain unsupported; explicit compilation
+errors or `missing_native_fetch_context` diagnostics replace incorrect execution.
+
+A separate production-reference SameSuite EI/HALT diagnostic still fails:
+VBlank is requested while LCD is disabled. Correct return PCs isolate that
+remaining PPU issue; a private diagnostic gate is not a production fix or native
+PASS. The collection-wide results below retain dated provenance.
+
+Tetris preserved-coverage rebuild was exercised with SDL input on an isolated
+BlastEm display: movement, rotation, drops, GAME OVER and return to level
+selection were observed. No missing-block marker/counter was triggered over
+14,942 Genesis frames. This is a regression check, not a new hardware test,
+full gameplay proof or performance improvement. All older checkpoints remain
+untouched. Fresh 43-ROM compatibility regressions pass in both Python and
+native Genesis execution. The complete native-enabled suite passes **267/267**
+methods (zero failures/skips); both resumable batch processes exit 0. Fast
+private/public suites pass 224 methods with 43 native-only skips. Blargg
+`02-interrupts.gb` also passes a fresh Python serial-protocol run. The 43-ROM
+protocol helper saved all PASS results with emulator child exit 0; its outer
+shell reported 143 afterward, an infrastructure caveat rather than a clean
+outer-run exit. No ROM/log/screenshot/profile is included in publication.
 
 
-## Reduced HALT-fetch regression — 2026-11-19 follow-up
+
+
+## Historical reduced HALT-fetch regression — 2026-11-19 follow-up
 
 Three original probes now isolate the native HALT failure. The NOP control
 passes; the one-byte and immediate-operand HALT cases fail natively with no
@@ -14,8 +49,9 @@ entries and correct PC semantics, not a test/game patch.
 
 No compiler/CPU/runtime change was made. The full fast suites pass218methods,
 with41native-only skips (259total). These probes are separate from the4510
-immutable fixture results; the native failures remain unresolved. See the
-[reproducer and result details](TEST_ROM_RESULTS.md#reduced-halt-fetch-probes--small-follow-up).
+immutable fixture results. Those native failures were subsequently fixed in
+the 2026-11-20 follow-up above. See the
+[reproducer and result details](TEST_ROM_RESULTS.md#historical-reduced-halt-fetch-probes--small-follow-up).
 
 
 ## Collection-wide test validation — 2026-11-19
@@ -31,9 +67,9 @@ with multiple budgets, not one uniform run or full compatibility claim.
 - All11 individual Blargg CPU ROMs and both combined memory-timing ROMs pass
   in Python. The combined CPU ROM instead reaches unsupported opcode$10 in
   WRAM, also with the previous palette state; root cause remains unresolved.
-- Native `halt_op_dupe` fails (1 instead of2) while Python passes. Native HALT
-  lowering lacks the reference's fetch-duplication behavior. This is a general
-  CPU priority, separate from missing trace coverage.
+- Native `halt_op_dupe` then failed (1 instead of2) while Python passed. Native HALT
+  lowering lacked the reference's fetch-duplication behavior. This general CPU
+  defect, separate from trace coverage, was fixed on 2026-11-20.
 - Three sampled PPU tests fail identically in Python/native; their precise
   hardware-model causes need investigation. Mooneye bank tests fail broadly.
 

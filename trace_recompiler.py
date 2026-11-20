@@ -524,7 +524,7 @@ def parse_input_script(spec: str):
 def native_body(block,optimize_hram=True):
     """Return direct 68000 statements for semantics already safe to lower."""
     op,operand,pc,bank=block["opcode"],block["operand"],block["pc"],block["bank"]
-    nextpc=(pc+len(bytes.fromhex(block["bytes"])))&0xFFFF; fam=block["family"]
+    nextpc=(pc+len(bytes.fromhex(block["bytes"]))-int(block.get("halt_fetch",False)))&0xFFFF; fam=block["family"]
     body=[]
     # Constant HRAM loads/stores need no mapper, I/O or DMA-access dispatch.
     # Keep normal instruction-cycle publication and write diagnostics; do not
@@ -587,7 +587,10 @@ def native_body(block,optimize_hram=True):
     elif fam=="DI": body += ["clr.b gb_ime","clr.b gb_ei_delay"]
     elif fam=="EI":
         body += ["tst.b gb_ime",f"bne.s .ei_done_{stem}","tst.b gb_ei_delay",f"bne.s .ei_done_{stem}","move.b #2,gb_ei_delay",f".ei_done_{stem}:"]
-    elif fam=="HALT": body.append("move.b #1,gb_halted")
+    elif fam=="HALT":
+        return [f"move.w #${pc:04X},gb_pc","jsr gb_halt_enter",f"tst.b d0",
+                f"beq.s .halt_execute_{stem}","jmp gb_dispatch_tree",f".halt_execute_{stem}:",
+                f"move.w #${nextpc:04X},gb_pc","jmp gb_halt_dispatch"]
     elif fam=="XOR_A_R" and (op&7)==7: body += ["clr.b gb_a","move.b #$80,gb_f"]
     elif fam in ("AND_A_R","OR_A_R","XOR_A_R"):
         body += load_r_d3(op&7)+["moveq #0,d0","move.b gb_a,d0"]
@@ -722,9 +725,9 @@ def native_body(block,optimize_hram=True):
         body += ["move.w gb_h,gb_pc","cmpi.w #$4000,gb_h",f"blo.s .jphlfixed_{stem}","cmpi.w #$8000,gb_h",f"bhs.s .jphlfixed_{stem}","move.w gb_rom_bank,gb_bank",f"bra.s .jphlready_{stem}",f".jphlfixed_{stem}:","clr.w gb_bank",f".jphlready_{stem}:","jmp gb_dispatch"]
         return body
     elif fam=="JR":
-        delta=(operand&255)-256 if operand&128 else operand&255; nextpc=(pc+2+delta)&0xFFFF
+        delta=(operand&255)-256 if operand&128 else operand&255; nextpc=(nextpc+delta)&0xFFFF
     elif fam=="JR_CC":
-        delta=(operand&255)-256 if operand&128 else operand&255; target=(pc+2+delta)&0xFFFF; cond=(op>>3)&3; bit=7 if cond<2 else 4
+        delta=(operand&255)-256 if operand&128 else operand&255; target=(nextpc+delta)&0xFFFF; cond=(op>>3)&3; bit=7 if cond<2 else 4
         # BTST sets its Z result when the selected GB flag bit is clear.
         branch=("beq.s","bne.s","beq.s","bne.s")[cond]
         body += [f"move.w #${nextpc:04X},gb_pc",f"btst #{bit},gb_f",f"{branch} .taken_{stem}","jmp gb_dispatch",f".taken_{stem}:",f"move.b #{taken_cost},gb_step_cycles"]
@@ -801,13 +804,24 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
         if key in candidate_keys:return
         candidate_keys.add(key)
         if limit is None or len(target)<limit:target.append((copy.deepcopy(cpu),depth,origin,frame,key))
+    halt_observed=collections.defaultdict(collections.Counter)
     def trace_step(cpu,memory,scenario_keys):
+        suppressed=cpu.halt_bug
         cpu.step()
         # Record the bytes actually fetched by the CPU after its M-cycle bus
         # transition. Peeking before step() is wrong for DMA-contended OAM and
         # also invents instructions during HALT or interrupt dispatch.
         if cpu.last_instruction is None:return
         pc=cpu.last_pc;bank=cpu.last_bank;key=(bank,pc);raw=cpu.last_instruction;hits[key]+=1
+        if suppressed:
+            if pc>=0x8000:
+                raise ValueError(f"HALT suppressed fetch in writable code at ${pc:04X} is not yet supported")
+            offset=pc if pc<0x4000 else bank*0x4000+pc-0x4000
+            normal=rom[offset:offset+instruction_length(raw[0])]
+            limit=0x4000 if pc<0x4000 else 0x8000
+            if len(normal)!=instruction_length(raw[0]) or pc+len(normal)>limit or raw!=normal[:1]+normal[:len(normal)-1]:
+                raise ValueError(f"unsupported HALT ROM fetch boundary at ${bank:02X}:${pc:04X}")
+            halt_observed[key][raw]+=1;raw=normal
         observed_banks[key].add(memory.rom_bank)
         observed[key][raw]+=1
         if key not in scenario_keys:
@@ -915,7 +929,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
         else:exploration_report["stop_reason"]="exploration queue exhausted"
         scenario_reports.append({"name":"automatic-input-exploration","blocks":len(exploration_keys),"steps_executed":exploration_report["steps_executed"],"coverage_growth":[exploration_report["new_blocks"]],"stop_reason":exploration_report["stop_reason"],"end_pc":None,"end_frame":None})
     fresh_dynamic_unique_block_count=len(first)
-    coverage_imports=merge_coverage_profiles(imported_profiles,first,hits,observed,observed_banks,dynamic_values)
+    coverage_imports=merge_coverage_profiles(imported_profiles,first,hits,observed,observed_banks,dynamic_values,halt_observed=halt_observed)
     dynamic_unique_block_count=sum(hits[key]>0 for key in first)
     # Close direct ROM control flow from every dynamically observed entry.
     # Trace discovery identifies the active banks and dynamic targets; this
@@ -992,6 +1006,30 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
                 code_end=target_offset if code_end is None else min(code_end,target_offset)
         if diagnostics is not None:diagnostics['stop_reason']=stop_reason
         return candidates
+    halt_contexts={}
+    def add_halt_fetch(key):
+        if key is None or key in halt_contexts:return
+        bank,pc=key
+        # Writable-code suppression needs context-specific byte guards; do not
+        # silently execute an ordinary RAM entry with the wrong fetch semantics.
+        if pc>=0x8000:return
+        add_rom_block(key)
+        if key not in first:return
+        raw=first[key];bug=raw[:1]+raw[:len(raw)-1]
+        halt_contexts[key]=bug
+        fall=(pc+len(bug)-1)&0xFFFF;fam=family(bug[0])
+        operand=bug[1] if len(bug)==2 else bug[1]|bug[2]<<8 if len(bug)==3 else 0
+        addresses=[]
+        if fam in ('JR','JR_CC'):
+            delta=operand-256 if operand&128 else operand
+            addresses=[(fall+delta)&0xFFFF]+([fall] if fam=='JR_CC' else [])
+        elif fam in ('JP','JP_CC'):addresses=[operand]+([fall] if fam=='JP_CC' else [])
+        elif fam in ('CALL','CALL_CC'):addresses=[operand,fall]
+        elif fam=='RST':addresses=[bug[0]&0x38,fall]
+        elif fam=='HALT':add_halt_fetch(key)
+        elif fam not in ('RET','RETI','JP_HL','STOP','INVALID','UNCLASSIFIED'):addresses=[fall]
+        for address in addresses:add_rom_block(rom_key(key,address))
+    for key in sorted(halt_observed):add_halt_fetch(key)
     # Interrupt entry is asynchronous and target timing can take a vector that
     # a finite reference trace did not. Compile every non-padding cartridge
     # vector independently of whether the oracle happened to service it.
@@ -1026,6 +1064,9 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
         expanded.add(key);bank,pc=key;raw=first[key];op=raw[0];fam=family(op)
         size=len(raw);fall=(pc+size)&0xFFFF;operand=(raw[1] if size==2 else (raw[1]|raw[2]<<8 if size==3 else 0))
         successors=[]
+        if fam=="HALT":
+            # Both ordinary wake-up and suppressed fetch can follow HALT.
+            successor=rom_key(key,fall);add_rom_block(successor);add_halt_fetch(successor)
         if fam=="JR":
             delta=(operand&255)-256 if operand&128 else operand&255;successors=[(pc+2+delta)&0xFFFF]
         elif fam=="JR_CC":
@@ -1157,6 +1198,9 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
         raw=first[(bank,pc)]; operand=(raw[1] if len(raw)==2 else (raw[1]|raw[2]<<8 if len(raw)==3 else 0))
         block={"bank":bank,"pc":pc,"opcode":raw[0],"operand":operand,"bytes":raw.hex(),"family":family(raw[0]),"hits":count}
         block["observed_variants"]=[value.hex() for value in observed[(bank,pc)] if value!=raw]
+        if (bank,pc) in halt_contexts:
+            block['halt_fetch_bytes']=halt_contexts[(bank,pc)].hex()
+            block['halt_fetch_hits']=sum(halt_observed[(bank,pc)].values())
         block["native_lowered"]=native_body(block) is not None; blocks.append(block)
     # Recognize short, backward, read-only polling loops. These commonly wait
     # for a VBlank flag or LY value and would otherwise consume nearly all
@@ -1207,7 +1251,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
                 block["idle_wait"]=True
     for block in blocks:block["native_lowered"]=native_body(block) is not None
     out.mkdir(parents=True,exist_ok=True)
-    (out/"trace-profile.json").write_text(json.dumps({"input":str(rom_path),"source_sha256":hashlib.sha256(rom).hexdigest(),"coverage_imports":coverage_imports,"fresh_dynamic_unique_block_count":fresh_dynamic_unique_block_count,"steps_per_scenario":steps,"auto_steps":auto_steps,"auto_inputs":auto_inputs,"test_serial":test_serial,"total_steps_executed":sum(s["steps_executed"] for s in scenario_reports),"dynamic_unique_blocks":dynamic_unique_block_count,"indirect_table_targets":len(indirect_table_targets),"hl_pointer_table_targets":len(hl_table_targets),"inline_byte_offset_tables":inline_offset_tables,"tagged_callback_targets":len(tagged_targets),"tagged_callback_returns":len(tagged_returns),"tagged_callback_tables":tagged_tables,"bitmask_dispatch_targets":len(bitmask_targets),"rst_inline_table_targets":len(rst_table_targets),"banked_thunk_targets":len(banked_thunk_targets),"constant_bank_call_targets":len(constant_bank_targets),"constant_far_call_targets":len(far_call_targets),"constant_far_call_returns":len(far_call_returns),"banked_pointer_table_targets":len(far_table_targets),"banked_pointer_tables":far_table_reports,"bank_context_targets":len(bank_context_targets),"inline_bc_call_targets":len(inline_bc_targets),"inline_bc_call_returns":len(inline_bc_returns),"inline_bc_call_tables":inline_bc_tables,"indexed_call_targets":len(indexed_call_targets),"indexed_call_returns":len(indexed_call_returns),"indexed_call_tables":indexed_call_reports,"ram_callback_targets":len(ram_callback_targets),"ram_callback_returns":len(ram_callback_returns),"ram_callback_records":ram_callback_report.get("records",[]),"ram_callback_analysis_limits":{"pair_limit_reached":ram_callback_report.get("pair_limit_reached",False),"exhausted_contexts":ram_callback_report.get("exhausted_contexts",[])},"total_blocks_after_static_closure":len(blocks),"input_exploration":exploration_report,"scenarios":scenario_reports,"blocks":blocks},indent=2)+"\n")
+    (out/"trace-profile.json").write_text(json.dumps({"input":str(rom_path),"source_sha256":hashlib.sha256(rom).hexdigest(),"coverage_imports":coverage_imports,"fresh_dynamic_unique_block_count":fresh_dynamic_unique_block_count,"steps_per_scenario":steps,"auto_steps":auto_steps,"auto_inputs":auto_inputs,"test_serial":test_serial,"total_steps_executed":sum(s["steps_executed"] for s in scenario_reports),"dynamic_unique_blocks":dynamic_unique_block_count,"indirect_table_targets":len(indirect_table_targets),"hl_pointer_table_targets":len(hl_table_targets),"inline_byte_offset_tables":inline_offset_tables,"halt_fetch_contexts":len(halt_contexts),"halt_fetch_observations":sum(sum(v.values()) for v in halt_observed.values()),"tagged_callback_targets":len(tagged_targets),"tagged_callback_returns":len(tagged_returns),"tagged_callback_tables":tagged_tables,"bitmask_dispatch_targets":len(bitmask_targets),"rst_inline_table_targets":len(rst_table_targets),"banked_thunk_targets":len(banked_thunk_targets),"constant_bank_call_targets":len(constant_bank_targets),"constant_far_call_targets":len(far_call_targets),"constant_far_call_returns":len(far_call_returns),"banked_pointer_table_targets":len(far_table_targets),"banked_pointer_tables":far_table_reports,"bank_context_targets":len(bank_context_targets),"inline_bc_call_targets":len(inline_bc_targets),"inline_bc_call_returns":len(inline_bc_returns),"inline_bc_call_tables":inline_bc_tables,"indexed_call_targets":len(indexed_call_targets),"indexed_call_returns":len(indexed_call_returns),"indexed_call_tables":indexed_call_reports,"ram_callback_targets":len(ram_callback_targets),"ram_callback_returns":len(ram_callback_returns),"ram_callback_records":ram_callback_report.get("records",[]),"ram_callback_analysis_limits":{"pair_limit_reached":ram_callback_report.get("pair_limit_reached",False),"exhausted_contexts":ram_callback_report.get("exhausted_contexts",[])},"total_blocks_after_static_closure":len(blocks),"input_exploration":exploration_report,"scenarios":scenario_reports,"blocks":blocks},indent=2)+"\n")
     emit_native_blocks(blocks,out)
     return blocks
 
@@ -1321,7 +1365,7 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
         claimed.update(sequence);fusion_bytes+=estimate
     elided_cycle_stores=0
     entry=next((b for b in blocks if b["bank"] == 0 and b["pc"] == 0x100),blocks[0])
-    lines=["; Trace-guided static LR35902 -> 68000 block output.","\txdef gb_compiled_entry,gb_compiled_block_table,gb_dispatch_tree"]
+    lines=["; Trace-guided static LR35902 -> 68000 block output.","\txdef gb_compiled_entry,gb_compiled_block_table,gb_dispatch_tree,gb_halt_dispatch_tree"]
     lines += ["gb_compiled_entry:",f"\tbra.w {label(entry)}",""]
     for block in blocks:
         lines.append(f"{label(block)}:")
@@ -1385,6 +1429,32 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
                 lines += [f"\tmove.w #${variant['bank']:04X},gb_bank",f"\tmove.w #${variant['pc']:04X},gb_pc",
                           f"\tmove.b #${variant['opcode']:02X},gb_opcode",f"\tmove.w #${variant['operand']:04X},gb_operand",
                           f"\tjsr gbop_{variant['family'].lower()}","\tjmp gb_dispatch",""]
+    halt_blocks=[]
+    for block in blocks:
+        encoded=block.get('halt_fetch_bytes')
+        if encoded is None:continue
+        raw=bytes.fromhex(encoded);normal=bytes.fromhex(block['bytes'])
+        if block['pc']>=0x8000 or raw!=normal[:1]+normal[:len(normal)-1]:
+            raise ValueError('invalid native HALT fetch context')
+        variant={**block,'bytes':encoded,'opcode':raw[0],
+                 'operand':raw[1] if len(raw)==2 else raw[1]|raw[2]<<8 if len(raw)==3 else 0,
+                 'family':family(raw[0]),'halt_fetch':True,'variant_suffix':'_HALT'}
+        for name in ('idle_wait','idle_ly_target','bus_fetch_cycles'):variant.pop(name,None)
+        body=lower(variant)
+        if body is None:continue
+        halt_blocks.append(variant)
+        lines += [f"gb_halt_B{block['bank']:03X}_{block['pc']:04X}:",
+                  f"\tmove.b #{instruction_cycles(raw[0],variant['operand'],False)},gb_step_cycles"]
+        lines += ['\t'+line for line in body]+['']
+    # HALT-only dispatch has no cost on ordinary entries or chain stubs.
+    lines += ['gb_halt_dispatch_tree:','\tjsr gb_normalize_bank','\tmoveq #0,d0',
+              '\tmove.w gb_bank,d0','\tswap d0','\tmove.w gb_pc,d0']
+    for block in sorted(halt_blocks,key=lambda b:(b['bank'],b['pc'])):
+        stem=f"B{block['bank']:03X}_{block['pc']:04X}"
+        identity=(block['bank']<<16)|block['pc']
+        lines += [f'\tcmpi.l #${identity:08X},d0',f'\tbne.s .halt_next_{stem}',
+                  f'\tjmp gb_halt_{stem}',f'.halt_next_{stem}:']
+    lines += ['\tmove.b #1,gb_missing_fetch_context','\tjmp gb_missing_block','']
     for start,(sequence,target,cost) in sorted(fused_regions.items()):
         stem=f"B{start[0]:03X}_{start[1]:04X}"
         lines += [f"gb_fused_{stem}:"]
@@ -1540,6 +1610,7 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
     (out/"translated_trace.s").write_text("\n".join(lines))
     (out/"native-codegen-report.json").write_text(json.dumps({
         "blocks":len(blocks),"chain_targets":len(chain_targets),
+        "halt_fetch_native_entries":len(halt_blocks),
         "compact_chain_targets":len(compact_targets),
         "compact_bank_immediates":compact_bank_immediates,
         "compact_bank_potential_bytes_saved":2*sum(0<=bank<=127 for bank,pc in compact_targets),

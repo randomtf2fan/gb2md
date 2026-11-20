@@ -55,6 +55,8 @@ gb_irq_entry equ $FF0058
 gb_fetch_bytes equ $FF0059       ; three sampled bytes for native variant guards
 gb_bus_write_charged equ $FF005C ; stack bus phase already advanced by sequencer
 gb_batch_bias equ $FF005E        ; virtual credit: 200 - next IRQ event distance
+gb_halt_bug equ $FF0080          ; one suppressed opcode-PC increment
+gb_missing_fetch_context equ $FF0081 ; missing HALT context, not normal opcode
 gb_io equ $FF0100
 gb_hram equ $FF0180
 gb_oam equ $FF0200
@@ -82,6 +84,65 @@ gb_missing_block:
 	addq.l #1,gb_missing_count
 .missing_halt:
 	bra.w gb_missing_block
+
+
+; HALT entry is an instruction boundary, even when prior pure instructions
+; accumulated cycles in d7. Flush only those cycles before sampling IE/IF.
+; A partial flush must not advance EI a second time or service an IRQ midway.
+; Caller has published the current HALT PC. d0=1 means preempted before HALT.
+gb_halt_enter:
+	moveq #0,d0
+	move.b gb_ei_delay,d0
+	move.w d0,-(sp)
+	move.b gb_defer_irq,d0
+	move.w d0,-(sp)
+	clr.b gb_ei_delay
+	move.b #1,gb_defer_irq
+	clr.b gb_step_cycles
+	bsr.w gb_tick
+	move.w (sp)+,d0
+	move.b d0,gb_defer_irq
+	move.w (sp)+,d0
+	move.b d0,gb_ei_delay
+	clr.b gb_halt_bug
+	move.b gb_io+$0F,d0
+	and.b gb_ie,d0
+	andi.b #$1F,d0
+	beq.s .halt_sleep
+	tst.b gb_ime
+	beq.s .halt_suppress_fetch
+	; An IRQ made eligible by the preceding batch preempts this instruction.
+	bsr.w gb_tick
+	clr.b gb_step_cycles
+	moveq #1,d0
+	rts
+.halt_suppress_fetch:
+	move.b #1,gb_halt_bug
+	clr.b gb_halted
+	bra.s .halt_publish_cost
+.halt_sleep:
+	move.b #1,gb_halted
+.halt_publish_cost:
+	move.b #4,gb_step_cycles
+	moveq #0,d0
+	rts
+
+; Only HALT uses this dispatcher. Ordinary instruction/chain dispatch pays
+; no fetch-context check. EI/HALT IRQ entry consumes the latch as a return-PC fix.
+gb_halt_dispatch:
+	clr.b gb_force_tick
+	bsr.w gb_tick
+	tst.b gb_halted
+	beq.s .halt_dispatch_awake
+	bsr.w gb_halt_wait
+	bra.s gb_halt_dispatch
+.halt_dispatch_awake:
+	tst.b gb_halt_bug
+	beq.s .halt_normal_fetch
+	clr.b gb_halt_bug
+	jmp gb_halt_dispatch_tree
+.halt_normal_fetch:
+	jmp gb_dispatch_tree
 
 ; Logical PC determines execution identity; bank zero is also legal in an
 ; MBC5 upper window, so do not infer the window from the old gb_bank value.
@@ -1362,6 +1423,12 @@ gb_tick:
 	clr.b gb_halted
 	tst.b gb_ime
 	beq.w .tick_done
+	; EI/HALT: the IRQ returns to HALT, with an ordinary handler fetch.
+	tst.b gb_halt_bug
+	beq.s .irq_fetch_ready
+	subq.w #1,gb_pc
+	clr.b gb_halt_bug
+.irq_fetch_ready:
 	clr.b gb_ime
 	move.b #1,gb_irq_entry
 	move.b #1,gb_defer_irq

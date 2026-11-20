@@ -391,7 +391,7 @@ def run_native_blastem(result, source: Path, blastem: Path, frames: int, timeout
         "p/x [$ff0000].w [$ff0002].w [$ff0008].b [$ff0009].b "
         "[$ff000a].b [$ff000b].b [$ff000c].b [$ff000d].b "
         "[$ff000e].b [$ff000f].b [$ff0010].w "
-        "[$ff0018].l [$ff0038].l [$ff0020].l\nquit\n"
+        "[$ff0018].l [$ff0038].l [$ff0020].l [$ff0081].b\nquit\n"
     )
     if micro:
         commands=commands.replace("quit\n","p/x [$ff0180].b [$ff0181].b [$ff0182].b\nquit\n")
@@ -431,8 +431,12 @@ def run_native_blastem(result, source: Path, blastem: Path, frames: int, timeout
         native['serial_output']=bytes(raw[:count or 0]).decode('ascii','replace')
     if values.get("FF0018.l")==0xBADB10C0 or values.get("FF0038.l",0)>0:
         location=f"bank ${bank:04X} PC ${pc:04X}" if bank is not None and pc is not None else "unknown bank/PC"
-        native.update(status="FAIL",category="missing_native_block",
-                      detail=f"Missing native block at {location}; increase trace/discovery coverage")
+        if values.get("FF0081.b")==1:
+            native.update(status="FAIL",category="missing_native_fetch_context",
+                          detail=f"Missing HALT suppressed-fetch entry at {location}; rebuild with fetch-context discovery; writable-code contexts are not yet supported")
+        else:
+            native.update(status="FAIL",category="missing_native_block",
+                          detail=f"Missing native block at {location}; increase trace/discovery coverage")
     elif micro:
         cycles=values.get("FF0020.l")
         flag=values.get("FF0182.b")

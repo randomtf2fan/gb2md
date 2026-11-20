@@ -350,6 +350,11 @@ class CPU:
         if pending:
             self.halted=False
             if self.ime:
+                # EI/HALT with an already pending IRQ returns to HALT. The
+                # suppressed increment applies to the return PC, not to the
+                # first instruction of the interrupt handler.
+                if self.halt_bug:
+                    self.pc=(self.pc-1)&0xFFFF;self.halt_bug=False
                 self.ime=False
                 self.idle_cycle();self.idle_cycle()
                 # The upper PC push may overwrite IE. Select/acknowledge

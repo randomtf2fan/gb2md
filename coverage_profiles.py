@@ -67,17 +67,30 @@ def load_coverage_profiles(rom, paths):
                     raise ValueError(f'{path}: unsupported RAM-code location')
                 if raw not in values:
                     values.append(raw)
-            entries.append((bank, pc, hits, values))
+            halt_raw=None;halt_hits=block.get('halt_fetch_hits',0)
+            if type(halt_hits) is not int or not 0<=halt_hits<2**63:
+                raise ValueError(f'{path}: invalid HALT fetch hit count')
+            if 'halt_fetch_bytes' in block:
+                encoded=block['halt_fetch_bytes'];normal=values[0]
+                expected=normal[:1]+normal[:len(normal)-1]
+                if pc>=0x8000 or not isinstance(encoded,str) or encoded!=expected.hex():
+                    raise ValueError(f'{path}: invalid HALT fetch context at {bank:02X}:{pc:04X}')
+                halt_raw=expected
+            elif halt_hits:
+                raise ValueError(f'{path}: HALT hits without fetch context')
+            entries.append((bank, pc, hits, values, halt_raw, halt_hits))
         result.append((path, entries))
     return result
 
 
-def merge_coverage_profiles(profiles, first, hits, observed, observed_banks, dynamic_values):
+def merge_coverage_profiles(profiles, first, hits, observed, observed_banks, dynamic_values,halt_observed=None):
     reports = []
     for path, entries in profiles:
         before = len(first)
-        for bank, pc, count, values in entries:
+        for bank, pc, count, values, halt_raw, halt_hits in entries:
             key = bank, pc
+            if halt_raw is not None and halt_observed is not None:
+                halt_observed[key][halt_raw]+=halt_hits
             first.setdefault(key, values[0])
             hits[key] += count
             for raw in values:
@@ -87,6 +100,6 @@ def merge_coverage_profiles(profiles, first, hits, observed, observed_banks, dyn
                         dynamic_values[pc + offset].add(byte)
             if 0x4000 <= pc < 0x8000 and count:
                 observed_banks[key].add(bank)
-        reports.append({'path': str(path), 'entries': len(entries), 'observed_entries': sum(count > 0 for _, _, count, _ in entries),
+        reports.append({'path': str(path), 'entries': len(entries), 'observed_entries': sum(count > 0 for _, _, count, _, _, _ in entries),
                         'new_entries': len(first) - before})
     return reports
