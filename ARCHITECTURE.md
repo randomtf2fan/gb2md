@@ -1287,7 +1287,50 @@ mixed normal/bugged execution at one PC, EI/HALT, timer-boundary phases and ROM
 bank/window contexts. Native checks compare register/WRAM and DIV/TIMA results.
 The existing timer/peripheral models otherwise remain unchanged.
 
-A separate production-reference failure remains in SameSuite's EI/HALT ROM:
+A separate production-reference failure was isolated in SameSuite's EI/HALT ROM:
 VBlank can be requested while LCD is disabled. A private diagnostic gate isolates
-that PPU issue; it is not a production or native PASS. Coordinated LCD timing and
-startup-state work remains necessary.
+that PPU issue; the gate itself was not a production or native PASS. The
+2026-11-22 correction below subsequently fixes the request and validates the
+ROM in both backends. Coordinated LCD timing/startup work remains necessary.
+
+## LCD-off VBlank generation (2026-11-22)
+
+[Pan Docs LCDC](https://github.com/gbdev/pandocs/blob/master/src/LCDC.md) describes
+LCDC.7 as the LCD/PPU enable, and its
+[interrupt documentation](https://github.com/gbdev/pandocs/blob/master/src/Interrupt_Sources.md)
+identifies VBlank entry as the request source. Both backends previously requested
+IF.0 at LY 144 before checking that enable. This could preempt a timer handler
+while software deliberately kept the LCD disabled.
+
+`Memory.tick()` now requests IF.0 at each enabled VBlank boundary visited by its
+existing event loop. This also fixes large tick calls that cross the boundary
+but end on another scanline. `gb_tick` tests LCDC.7 before setting IF.0 in its
+scanline loop. Existing accelerated VBlank/LY waits already require LCD enable.
+The correction does not clear pending IF bits or pause the source CPU clock,
+DIV/TIMA or DMA. `gb_stat_sync`/`Memory._update_stat` retain their existing
+rising-edge logic and disabled-LCD STAT suppression.
+
+`tests/test_lcd_vblank.py` creates original programs and checks LCD off, retained
+requests, enabled VBlank, toggles, and timers while disabled. Reference tests
+also compare small/bulk advancement and acknowledge/reassert boundaries. Its
+opt-in native method checks actual WRAM result flags and missing-block counters.
+SameSuite's EI/HALT completion was additionally observed with an explicit
+serial diagnostic peer on Python and Genesis, without editing the fixture or
+injecting results.
+
+This is a request-generation correction, not a complete LCD stop/restart model.
+Reference LY still derives from the global source-cycle counter and native
+scanline phase still advances while disabled. LY reset, LCD restart phase,
+startup blanking and other post-boot register values require further coordinated
+work. Reference LCDC now starts at $91, matching native startup and the documented
+DMG post-boot state. Without that correction, removing false LCD-off VBlank
+requests exposed four HALT tests waiting forever on the reference's initially
+disabled LCD. This corrects the shared hardware startup state. Full PPU
+compatibility is not established; LCD register-write boundary ordering also
+needs further validation.
+
+The post-boot LCDC value follows the
+[hardware-register table](https://github.com/gbdev/pandocs/blob/master/src/Power_Up_Sequence.md#hardware-registers).
+Original diagnostics observe $FF40 before writing it and verify $91 on both
+backends. This does not claim complete boot-state accuracy (DIV/STAT and phase
+alignment still need separate validation).

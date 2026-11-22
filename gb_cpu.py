@@ -64,6 +64,7 @@ class Memory:
         self.oam = bytearray(0xA0); self.hram = bytearray(0x7F); self.io = bytearray(0x80)
         self.ie = 0
         self.io[0] = 0xCF  # FF00: no buttons pressed after the DMG boot ROM
+        self.io[0x40] = 0x91  # DMG post-boot LCDC, matching native startup.
         self.io[0x47] = 0xFC  # DMG post-boot BGP, matching the native startup.
         # FF04 exposes the upper byte of this internal divider. TIMA clocks on
         # falling edges of a TAC-selected divider bit.
@@ -235,7 +236,6 @@ class Memory:
         self.stat_line=line
 
     def tick(self, n=4):
-        old=self.io[0x44]
         self.timer_reloaded_this_cycle=False
         if not (self.io[0x07]&4) and not self.timer_reload_delay:
             # Most software leaves TIMA disabled. This fast path is exactly
@@ -259,9 +259,12 @@ class Memory:
             boundary=80 if dot<80 else 252 if dot<252 else 456
             cursor=min(end,cursor+boundary-dot)
             self._update_stat(cursor)
+            # Request only on an enabled PPU's transition into VBlank. Visit
+            # every edge, including one hidden inside a large tick batch.
+            if self.io[0x40]&0x80 and cursor%70224==456*144:
+                self.io[0x0F]|=1
         self.cycles = end
         self.io[0x44] = (self.cycles // 456) % 154 # LY approximation for boot-path waits
-        if old != 144 and self.io[0x44] == 144: self.io[0x0F] |= 1
 
 class CPU:
     def __init__(self, memory: Memory):

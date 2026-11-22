@@ -1337,9 +1337,9 @@ gb_tick:
 	bsr.w gb_stat_sync
 	cmpi.b #144,gb_io+$44
 	bne.s .no_scanline
-	bset #0,gb_io+$0F
 	btst #7,gb_io+$40
 	beq.s .no_scanline
+	bset #0,gb_io+$0F
 	tst.b gb_video_dirty
 	beq.s .no_scanline
 	bsr.w gb_render_frame

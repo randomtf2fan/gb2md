@@ -1,6 +1,27 @@
 # Test ROM validation snapshot — 2026-11-19
 
 
+## 2026-11-22 LCD/VBlank follow-up
+
+SameSuite `interrupt/ei_delay_halt.gb` now passes in Python and native execution
+with the existing explicit diagnostic serial peer. Native observation checks
+Fibonacci registers immediately after the original completion marker, with no
+missing-block trap and emulator exit 0. This is one additional explicit fixture
+observation; the full collection tables below have not been rerun or recomputed.
+The general runner still does not automatically classify the SameSuite suite.
+Five original LCD/VBlank native programs pass; they are separate from the
+immutable downloaded collection. Native-enabled unit validation passes 273/273
+methods, zero failures/skips; fast private/public runs pass 229 with 44 native-only
+skips. All eleven individual Blargg CPU ROMs pass fresh Python serial-protocol
+runs; their native results remain NOT_RUN. Fresh 43-ROM reference checks pass,
+with div_write using a bounded 1M-instruction budget after the prior 300k timeout
+(the shorter result is retained). All 43 native fixtures also pass, with emulator/helper exits 0. Tetris native
+SDL regression observed gameplay, score 57, GAME OVER and menu return without
+missing blocks across 14942 Genesis frames. No fresh hardware or speed claim.
+See [current limitations](COMPATIBILITY.md#lcd-off-vblank-requests--2026-11-22).
+
+
+
 ## 2026-11-20 HALT follow-up
 
 The native `halt_op_dupe.gb` failure below is now fixed: fresh Python and
@@ -95,9 +116,9 @@ unsupported cartridge cases remain UNSUPPORTED.
 - Both combined Blargg memory-timing ROMs pass in Python at the longer budget.
 - Mooneye ROM-bank tests fail broadly. Selector aliasing and MBC1 windows need
   investigation; these failures alone do not establish the exact mapper defect.
-- Boot-state emulation remains incomplete: Python/native initial LCDC differ.
-  That was left unchanged because display phase/LY/interrupt timing must be
-  validated together. Sound, CGB and screenshot/audio comparison remain limited.
+- Boot-state emulation remained incomplete: Python/native initial LCDC differed.
+  This mismatch was later corrected on 2026-11-22; phase/LY/interrupt startup
+  alignment and other post-boot register values still need validation. Sound, CGB and screenshot/audio comparison remain limited.
 
 ## Observer changes and verification
 

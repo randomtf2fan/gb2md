@@ -1,5 +1,39 @@
 # GB2MD compatibility status
 
+## LCD-off VBlank requests — 2026-11-22
+
+Fixed a shared interrupt-generation defect: reaching the model's LY 144 no
+longer requests VBlank while LCDC.7 is clear. Existing pending IF bits remain
+set, timers and DMA keep advancing, and STAT's disabled-LCD suppression is
+preserved. The reference also observes VBlank boundaries inside large tick
+batches instead of checking only the final LY. No CPU instruction, banking,
+controller, GUI or native execution-speed change is included.
+
+Five original native diagnostics cover LCD off, pending IF bits, LCD on,
+on/off transitions and an active timer with LCD off. All pass in Python and
+native execution. SameSuite `interrupt/ei_delay_halt.gb`, previously failing,
+now passes in both backends using the existing explicit diagnostic serial peer.
+Native completion was observed at a breakpoint after the original LD B,B:
+Fibonacci registers, zero missing-block marker/count, emulator exit 0. This
+private explicit observer does not establish general SameSuite harness support.
+
+Full LCD timing remains incomplete: LY/scanline phase still advances while
+LCD is off; reset/restart phase, other boot-register differences and startup blanking
+are not corrected here. Compilation/boot/gameplay and protocol PASS remain
+separate claims. The reference LCDC startup value is also corrected from $00
+to $91, matching native startup and DMG post-boot state. Four exposed HALT-test
+timeouts are resolved in the fresh 43-ROM reference set. Full native-enabled
+unit validation passes **273/273**, with zero failures/skips; both workers exit 0.
+Fast private/public suites pass 229 methods with 44 native-only skips. All eleven
+individual Blargg CPU ROMs pass fresh Python serial tests (native NOT_RUN).
+One timer test, div_write, required a bounded 1M-instruction rerun after its
+old 300k budget expired; that shorter TIMEOUT observation is retained. Fresh native 43-ROM checks also pass, with all emulator/helper exits 0.
+Tetris replay over 14,942 Genesis frames verified gameplay, scoring (57),
+GAME OVER and return to level selection with zero missing-block markers.
+It does not establish full line-clear/restart-route coverage, hardware results
+or a speed improvement. Known-good checkpoints are preserved.
+
+
 ## Native HALT fetch correction — 2026-11-20
 
 ROM-backed HALT fetch suppression is now lowered to separate native 68000
@@ -15,10 +49,11 @@ success flag 1, no missing-block marker. Writable-code suppressed fetch and
 mixed-window multi-byte fetch contexts remain unsupported; explicit compilation
 errors or `missing_native_fetch_context` diagnostics replace incorrect execution.
 
-A separate production-reference SameSuite EI/HALT diagnostic still fails:
+At this 2026-11-20 milestone a separate reference SameSuite diagnostic failed:
 VBlank is requested while LCD is disabled. Correct return PCs isolate that
-remaining PPU issue; a private diagnostic gate is not a production fix or native
-PASS. The collection-wide results below retain dated provenance.
+PPU issue. The private diagnostic gate was not a production/native PASS;
+production correction and both-backend validation followed on 2026-11-22.
+The collection-wide results below retain dated provenance.
 
 Tetris preserved-coverage rebuild was exercised with SDL input on an isolated
 BlastEm display: movement, rotation, drops, GAME OVER and return to level
