@@ -1,6 +1,22 @@
 # Test ROM validation snapshot — 2026-11-19
 
 
+## 2026-11-22 background raster follow-up
+
+New original tests validate BG scanline composition, palette cache values and
+fallback behavior. These generated fixtures are separate from the immutable
+4510-ROM collection. A Bad Apple animation capture is a visual regression
+observation, not a test-suite protocol PASS. Final native-enabled suite: 277/277
+unit methods pass after an unchanged retry of one host-JIT startup failure;
+the original failure is retained. Fast private/public suites: 231 PASS / 46
+native skips. All 43 selected fixture ROMs pass Python/native execution.
+The 160M-step Bad Apple reference audit spans all 64 banks without missing
+entries/OOB reads, but is not a documented test-completion protocol or full
+native video/audio PASS. No downloaded fixture or old checkpoint was changed.
+See [the renderer status](COMPATIBILITY.md#background-scanline-composition--bad-apple--2026-11-22).
+
+
+
 ## 2026-11-22 LCD/VBlank follow-up
 
 SameSuite `interrupt/ei_delay_halt.gb` now passes in Python and native execution

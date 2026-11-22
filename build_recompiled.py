@@ -161,6 +161,7 @@ reset:
 \tmove.w #$0E00,$C00000
 \tjmp gb_compiled_entry
 \tinclude "{(ROOT/'runtime_68000.s').as_posix()}"
+\tinclude "{(ROOT/'raster_68000.s').as_posix()}"
 \tinclude "{(out/'translated_trace.s').absolute().as_posix()}"
 \tinclude "{(out/'unimplemented_68000.s').absolute().as_posix()}"
 	include "{(out/'renderer_table.s').absolute().as_posix()}"

@@ -1,5 +1,52 @@
 # GB2MD compatibility status
 
+## Background scanline composition / Bad Apple — 2026-11-22
+
+The fresh Bad Apple build was advancing source cycles, data and render calls
+without a missing-block trap. Its opening black interval was stretched by low
+throughput. The wrong fragment was a separate general rendering defect:
+visible-line SCY/BGP changes were discarded by frame-end-only presentation.
+A scanline reference reconstructed complete moving figures from the same data.
+
+The backend now automatically captures BG-only scenes when changed SCX/SCY/BGP
+writes occur on visible lines. It samples tile data and registers at fixed
+mode-3 end and writes palette-resolved opaque pixels to dedicated Genesis VDP
+patterns. Sprites/windows keep the established renderer. One quiet full frame
+returns to the normal path, so static initialization does not permanently pay
+raster costs. There are no title/hash/address-specific translations or extracted
+video assets. The GUI uses the same builder automatically; no new setting is
+needed.
+
+Original native fixtures compare all 144 output-row fingerprints for scroll,
+fine/wrapped addressing, signed tiles, palette splits and cache eviction, plus
+sprite/window, transition and static-scene fallbacks. A separate native helper
+probe checks every BGP value. The two-entry palette cache computes its tables
+on misses instead of adding a large ROM lookup table.
+
+Final native observation covered 72,002 Genesis frames: 20 distinct viewport
+captures, approximately 22.86 seconds of source playback and bank 6, with zero
+missing-block diagnostics. A bounded 160M-step Python audit covered 246.66
+source seconds and all 64 banks, with no uncovered native entries, out-of-range
+ROM reads or exceptions. It returned to blank VRAM/bank 0 after the stream;
+there is no automated end-of-video protocol, so this is not a full native PASS.
+
+Validation: 277/277 unit methods pass with native testing enabled, after one
+unchanged retry for a BlastEm host-JIT startup error before guest execution
+(original result/log retained). Fast private/public runs: 231 PASS / 46 native
+skips. All 43 selected fixtures pass in fresh Python/native runs. Final Tetris
+SDL regression verified gameplay, score 40, GAME OVER and menu return with no
+trap; raster activity stayed zero throughout. The near-4MiB prepared build
+still fits with all prior blocks and 550 fast stubs retained. Offscreen GUI
+construction/close passes; no new GUI setting is required.
+
+Playback is still very slow: sampled progress is about
+1.1 simulated GB clock fps versus approximately 2.1 on the old incorrect frame
+path. These differing content windows are not a controlled A/B benchmark.
+This does not establish real-time playback, full-clip completion or audio.
+Fixed scanline sampling is not a pixel FIFO. Raster sprites/windows, exact bus
+write-boundary behavior and tear-free buffering remain incomplete.
+
+
 ## LCD-off VBlank requests — 2026-11-22
 
 Fixed a shared interrupt-generation defect: reaching the model's LY 144 no

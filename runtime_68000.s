@@ -57,6 +57,20 @@ gb_bus_write_charged equ $FF005C ; stack bus phase already advanced by sequencer
 gb_batch_bias equ $FF005E        ; virtual credit: 200 - next IRQ event distance
 gb_halt_bug equ $FF0080          ; one suppressed opcode-PC increment
 gb_missing_fetch_context equ $FF0081 ; missing HALT context, not normal opcode
+gb_raster_armed equ $FF0082
+gb_raster_ready equ $FF0083
+gb_raster_lines equ $FF0084
+gb_raster_presented equ $FF0086
+gb_raster_frame_count equ $FF0088
+gb_raster_capture_count equ $FF008C
+gb_raster_seen equ $FF0090       ; visible register activity in this frame
+gb_raster_palette0 equ $FF0091
+gb_raster_palette1 equ $FF0092
+gb_raster_palette_valid0 equ $FF0093
+gb_raster_palette_valid1 equ $FF0094
+gb_raster_palette_slot equ $FF0095
+gb_raster_palette_cache equ $FFC940 ; two sparse 256-byte pixel-pair tables
+gb_raster_row_hashes equ $FFC700 ; 144 ordered output fingerprints, ends C93F
 gb_io equ $FF0100
 gb_hram equ $FF0180
 gb_oam equ $FF0200
@@ -701,7 +715,7 @@ gb_write8:
 	bra.w .io_done
 .not_oam_dma:
 	cmp.b d2,d0
-	beq.s .io_done
+	beq.w .io_done
 	cmpi.w #$0040,d1
 	beq.s .mark_video_dirty
 	cmpi.w #$0042,d1
@@ -716,6 +730,22 @@ gb_write8:
 .mark_video_dirty:
 	move.b #1,gb_video_dirty
 	move.b #1,gb_bg_dirty
+	; Changed visible-line scroll/palette values need scanline composition.
+	cmpi.w #$0042,d1
+	beq.s .raster_write_candidate
+	cmpi.w #$0043,d1
+	beq.s .raster_write_candidate
+	cmpi.w #$0047,d1
+	bne.s .check_lcdc_enable
+.raster_write_candidate:
+	cmpi.b #144,gb_io+$44
+	bhs.s .check_lcdc_enable
+	move.b gb_io+$40,d2
+	andi.b #$A2,d2
+	cmpi.b #$80,d2
+	bne.s .check_lcdc_enable
+	move.b #1,gb_raster_armed
+	move.b #1,gb_raster_seen
 .check_lcdc_enable:
 	cmpi.w #$0040,d1
 	bne.s .io_done
@@ -801,6 +831,8 @@ gb_idle_wait:
 ; New traces call this only for known WRAM/HRAM flag polling loops.
 gb_idle_flag_wait:
 	jsr gb_tick                       ; flush the branch and its basic block
+	tst.b gb_raster_armed
+	bne.w .idle_fallback
 	btst #1,gb_ie
 	bne.w .idle_fallback
 	tst.b gb_ime
@@ -851,6 +883,8 @@ gb_idle_flag_wait:
 gb_halt_wait:
 	tst.b gb_halted
 	beq.w .halt_wait_done
+	tst.b gb_raster_armed
+	bne.w .halt_stat_wait
 	; STAT may wake the CPU before VBlank. Stop at the next mode edge.
 	btst #1,gb_ie
 	bne.w .halt_stat_wait
@@ -994,6 +1028,8 @@ gb_idle_ly:
 	move.w (sp)+,d0
 	cmp.b gb_io+$44,d0
 	beq.w .idle_ly_done_early
+	tst.b gb_raster_armed
+	bne.w .idle_ly_fallback
 	; STAT-enabled polling cannot skip mode/coincidence transitions.
 	move.b gb_io+$41,d1
 	andi.b #$78,d1
@@ -1324,6 +1360,7 @@ gb_tick:
 	blo.s .stat_after_mode3
 	move.w #252,gb_ly_accum
 	bsr.w gb_stat_sync
+	bsr.w gb_raster_scanline
 .stat_after_mode3:
 	cmpi.w #456,d0
 	blo.s .scanlines_done
@@ -1338,12 +1375,14 @@ gb_tick:
 	cmpi.b #144,gb_io+$44
 	bne.s .no_scanline
 	btst #7,gb_io+$40
-	beq.s .no_scanline
+	beq.s .raster_vblank_end
 	bset #0,gb_io+$0F
 	tst.b gb_video_dirty
-	beq.s .no_scanline
+	beq.s .raster_vblank_end
 	bsr.w gb_render_frame
 	clr.b gb_video_dirty
+.raster_vblank_end:
+	bsr.w gb_raster_end_frame
 .no_scanline:
 	bra.w .scanline_loop
 .scanlines_done:
@@ -1768,6 +1807,14 @@ gb_render_frame:
 	endif
 	addq.l #1,gb_render_count
 	movem.l d0-d7/a0-a2,-(sp)
+	bsr.w gb_raster_present
+	tst.b d0
+	bne.w .raster_frame_done
+	tst.b gb_raster_presented
+	beq.s .normal_frame_ready
+	clr.b gb_raster_presented
+	move.b #1,gb_bg_dirty
+.normal_frame_ready:
 	; OAM changes are common during gameplay and do not require reconverting
 	; 12 KiB of patterns plus the full background map. Keep that work behind
 	; separate VRAM/background-state dirtiness flags.
@@ -2089,6 +2136,7 @@ gb_render_frame:
 	clr.b gb_vram_dirty
 	clr.b gb_oam_dirty
 	clr.b gb_bg_dirty
+.raster_frame_done:
 	move.w #$8174,$C00004
 	ifd GB2MD_SHOW_FPS
 	clr.b gb_fps_vdp_busy

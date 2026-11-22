@@ -435,3 +435,12 @@ high RAM access** checkbox enables this by default. Disable it, or use
 `--no-hram-opt`, for a compatibility comparison. Restart the GUI and rebuild
 to use the update. `benchmark_hram.py` provides original-code A/B workloads;
 see [COMPATIBILITY.md](COMPATIBILITY.md) for scoped results and limitations.
+
+### Scanline background effects
+
+The backend automatically uses scanline composition for visible SCX/SCY/BGP
+changes in background-only scenes. The GUI uses this through the ordinary
+compiler command. Static scenes return to the normal renderer; raster sprite
+and window composition remain unsupported. This improves effects such as
+palette/scroll-driven video, but is currently slow and can tear. See
+[compatibility results](COMPATIBILITY.md) before assuming complete playback.

@@ -1334,3 +1334,42 @@ The post-boot LCDC value follows the
 Original diagnostics observe $FF40 before writing it and verify $91 on both
 backends. This does not claim complete boot-state accuracy (DIV/STAT and phase
 alignment still need separate validation).
+
+## Automatic background scanline renderer (2026-11-22)
+
+`raster_68000.s` adds a native display path; source CPU execution remains
+recompiled 68000 blocks. `gb_write8` arms it for changed SCX/SCY/BGP writes
+while visible and with LCD on, sprites off and window off. `gb_tick` calls
+`gb_raster_scanline` at its existing fixed transfer-end boundary (dot 252).
+Capture waits for LY0 and checks contiguous lines, avoiding a partial first
+frame. Direct idle shortcuts are guarded so they cannot bypass required raster
+history. Existing hardware scheduling and normal block lowering are retained.
+
+Each row fetches the live selected GB map, signed/unsigned pattern row and
+fine SCX (including map wrap); BGP maps the source pixels to four final shades.
+Two sparse palette caches eliminate repeated per-pixel palette extraction.
+`gb_raster_select_palette` computes sixteen valid pixel-pair entries per miss;
+all 256 BGP values, including replacements, are checked in a native helper
+unit. `gb_raster.py` supplies the independent BG row oracle and diagnostic
+fingerprints. It is a rendering oracle, not a replacement CPU interpreter.
+
+VDP patterns $9000-$BCFF are separate from normal patterns, shell/HUD fonts and
+maps at $C000 and above. `gb_raster_present` selects the composed viewport and
+flat four-shade palette. `gb_raster_end_frame` returns a quiet scene to the
+normal renderer; sprite/window scenes also retain that path. Source pattern
+and map dirty flags remain set during raster presentation so a later normal
+frame restores all changed graphics. The GUI needs no new command-line option.
+
+Diagnostic state occupies native RAM $FF0082-$FF0095; $FFC700-$FFC93F holds
+144 ordered output-row fingerprints and $FFC940-$FFCB3F holds two palette
+caches. These do not overlap mapped source ERAM, serial-test output or FPS
+state. Captured-line and raster-render counters describe work, not unique video
+frames; actual changing captures are needed to establish animation.
+
+Limits are explicit: fixed-length scanlines, BG-only composition, first-full-
+frame activation latency, current register-write ordering, and visible front-
+buffer updates (possible tearing). LCDC-only and VRAM-only raster effects do
+not independently arm the path. Native rendering costs reduce throughput on
+these workloads; ordinary static or sprite/window scenes retain the existing
+renderer. Future work includes profiling, better buffering and wider raster
+composition, without ROM-specific decoding or game patches.
