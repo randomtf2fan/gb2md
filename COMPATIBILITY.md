@@ -1,5 +1,51 @@
 # GB2MD compatibility status
 
+## Broader compatibility retest — 2026-11-23
+
+Compiler/runtime source is unchanged from `46fee65`. Fresh unit testing with
+native integrations enabled passes **279/279 methods** after one unchanged
+retry of a BlastEm host-JIT startup error before guest execution; the original
+failure log/report is retained. The established **43 fixtures pass in both
+Python and native Genesis execution**.
+
+The expanded survey provides a less selective picture:
+
+| Python dataset | PASS | FAIL | TIMEOUT | UNSUPPORTED | NOT RUN |
+|---|---:|---:|---:|---:|---:|
+| Primary Mooneye, 115 ROMs | 57 | 27 | 4 | 24 | 3 |
+| Blargg individual CPU, 11 ROMs | 11 | 0 | 0 | 0 | 0 |
+| Blargg individual memory timing, 3 ROMs | 3 | 0 | 0 | 0 | 0 |
+| Unique total, 129 ROMs | 71 | 27 | 4 | 24 | 3 |
+
+The selected 43 overlap 40 primary Mooneye cases. Native results across the
+129 unique ROMs are **43 PASS / 86 NOT RUN**. Native Blargg CPU execution was
+not verified. All 4,510 available ROM binaries were inventoried, not executed.
+Primary Mooneye uses a 2M-instruction/2,400-source-frame budget; Blargg CPU uses
+10M/2,400. The selected native builds retain a 1M discovery floor and bounded
+observation windows. Emulator host fast-forward does not change source timing.
+
+All 27 failures report the documented Mooneye failure signature: nine PPU
+mode/STAT/scroll timing tests, three boot/unused-I/O tests, one serial startup
+test, eight MBC1 tests, and six MBC5 tests. The four timeouts remain inconclusive:
+MBC1 `bits_mode`, `bits_ramg`, `ram_256kb`, and `mgb_oam_dma_halt_sprites`.
+Unsupported cases comprise 17 non-target hardware models and seven MBC2
+cartridges. The three NOT RUN cases require manual verification or dump utilities.
+The Python CPU/VDP/harness are byte-identical to the pre-row-cache revision;
+these broader reference gaps are independent of native raster reuse.
+
+A diagnostic-only masked upper-ROM read variant clears all six failing MBC5
+ROM-size tests, while six probed MBC1 ROM-size tests still fail. Official results
+remain FAIL: no production fix or native validation of that variant was made.
+General mapper aliasing and consistent discovery/native bank resolution are the
+next investigation, alongside the remaining PPU/startup behavior. Increasing
+trace budgets cannot fix an explicit failure signature in the reference model.
+
+All 15 protected checkpoint images and 5,100 fixture files remain unchanged.
+No fresh commercial gameplay, physical-hardware, full video, or audio claim is
+made in this retest. Test fixtures, converted binaries and private logs are not
+included in the public repository.
+
+
 ## Exact BG raster-row reuse — 2026-11-23
 
 A baseline native debugger profile measured `gb_raster_scanline` at44.7% of
