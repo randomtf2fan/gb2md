@@ -1,5 +1,72 @@
 # GB2MD compatibility status
 
+## Exact BG raster-row reuse — 2026-11-23
+
+A baseline native debugger profile measured `gb_raster_scanline` at44.7% of
+elapsed master-cycle time over128 calls in one video interval. `gb_tick` was
+69.5% inclusive (it calls the raster helper); these percentages overlap.
+Frame presentation itself was negligible in its separate sample. This
+identified redundant row conversion as a measured target, rather than changing
+source clock rates or applying a video-specific shortcut.
+
+A general performance optimization compares BGP and all 40 resolved tile-plane
+bytes for each output row. Only exact matches skip pixel conversion and VDP
+pattern writes; source CPU/timer/interrupt/scanline scheduling is unchanged.
+Tile/map changes invalidate by byte comparison, and separate validity flags
+force cold rows to draw even for an all-zero input key. Aligned SCX also avoids
+redundant shifts. Normal-renderer scenes keep their existing path.
+
+Matched native Bad Apple observations compared the published Nov22 image,
+cache-disabled control, and cache-enabled candidate at 12 source-frame boundaries
+(30 through 360). All 12,557 sampled fields match at every boundary, including
+CPU registers, timer/interrupt state, guest IO/RAM and all144 output-row
+fingerprints. There were no missing-block diagnostics. Debugger stops occur
+mid-Genesis-frame, so the SDL captures can contain partial host frames and are
+not pixel-equality evidence. These are source-frame/state comparisons, not
+equal wall-time screenshots or a tearing-free presentation guarantee.
+
+| Source interval | Published GB clock fps | Reuse enabled | Speedup |
+|---|---:|---:|---:|
+| Frames30–360 | 1.136 | 1.451 | 1.278× |
+| Frames180–360 (moving image) | 1.133 | 1.397 | 1.233× |
+
+Rates use nominal NTSC60 Genesis VBlanks. Cache-disabled control measured1.134
+and1.131 respectively. At source frame360, 36,546 of50,832 captured rows reused
+output and14,286 decoded. This is a scoped raster-workload improvement, not a
+promise for all ROMs. Playback remains very slow; content fps is lower than GB
+clock fps. Full native video/audio playback and physical hardware are unverified.
+The previous22.86-source-second Nov22 observation remains a separate historical
+result; do not attribute that duration to this360-frame comparison.
+
+Focused native tests pass with cache enabled/disabled, comparing all 144 rows for
+aligned scroll, one-time tile/map mutations and initially zero keys. The earlier
+signed/wrapped scroll, palette eviction, fallback and palette-helper tests also
+pass. Fast private/public suites: 232 PASS / 47 native skips. With native tests
+enabled, all 279 methods PASS after one unchanged retry of a BlastEm host-JIT
+startup error before guest execution (initial failure/report/log retained).
+All 43 selected fixtures freshly PASS in both Python and native execution.
+
+The Tetris SDL replay covers gameplay, score 40, game over and return to the
+menu over 14,942 Genesis frames, with zero traps and raster/cache counters zero.
+All 39 viewport captures exactly match the prior Nov22 build. No line was
+cleared in this replay; this does not replace the older manual line-clear
+evidence or establish a new long-session hardware result. The public GUI
+offscreen smoke passes actual build through the updated backend, cancellation,
+button state restoration and output-folder link targeting (desktop opener mocked).
+
+The new continuous native observation covers 72,002 Genesis frames: 20 distinct
+viewport captures, 29.02 source seconds and bank 7, with zero missing markers.
+The older same-budget run advanced 22.86 source seconds (the new build advances 1.270× as far).
+Final capture counts are 248,622 rows: 171,617 reused, 77,005 decoded. This extends
+the new build's animation evidence; it is still not a full clip/audio/hardware PASS.
+
+The prepared near4MiB graph fits in4,193,578bytes, retaining550faststubs and all
+previous blocks (726bytes of cartridge-size headroom). GUI builds use row reuse
+by default; `--no-raster-cache` gives a comparison and the build report records
+`raster_row_cache`. Existing ROM outputs must be rebuilt.
+
+
+
 ## Background scanline composition / Bad Apple — 2026-11-22
 
 The fresh Bad Apple build was advancing source cycles, data and render calls

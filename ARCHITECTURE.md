@@ -1373,3 +1373,37 @@ not independently arm the path. Native rendering costs reduce throughput on
 these workloads; ordinary static or sprite/window scenes retain the existing
 renderer. Future work includes profiling, better buffering and wider raster
 composition, without ROM-specific decoding or game patches.
+
+
+## Exact raster-row reuse (2026-11-23)
+
+`gb_raster_scanline` still samples every eligible visible row at the same source
+clock boundary. Before converting pixels, it resolves the live tile map,
+signed/unsigned pattern selection, SCY and fine/wrapped SCX into 40 plane bytes:
+one low/high byte pair for each eight output pixels. An aligned SCX bypasses
+shifts that would cancel each other. The full BGP byte and these 40 bytes are
+compared with the previous record for that output LY. A hash never decides reuse.
+Different source addresses may reuse output only when their resolved inputs match.
+
+On equality the dedicated VDP row and its diagnostic fingerprint already match,
+so conversion, palette lookup and VDP pattern writes are skipped. On a mismatch,
+the existing conversion writes the new row before publishing its new key and
+valid flag. A separate validity byte forces initial drawing even when every key
+byte is zero. Tile/map mutations need no extra dirty-bit protocol: their resolved
+bytes are compared on the next capture. Normal rendering does not overwrite the
+reserved raster patterns, so cache records survive fallback and reactivation.
+
+`gb_raster_input_cache` occupies $FFD200-$FFECFF (144 records, 48-byte stride;
+42 bytes used per record). Valid flags occupy $FFED00-$FFED8F, and the 40-byte
+`gb_raster_row_scratch` starts at $FFEE00. Source ERAM ends at $FFC2FF, diagnostic
+serial data ends at $FFD1FF, and the native stack grows down from $FFFFFC.
+The new regions remain separate from these and the earlier palette caches.
+`gb_raster_reuse_count` ($FF0098) and `gb_raster_decode_count` ($FF009C) sum to
+`gb_raster_capture_count`, modulo 32 bits. Capture counts are not unique frames.
+
+`build(..., raster_cache=False)` or CLI `--no-raster-cache` defines
+`GB2MD_NO_RASTER_CACHE` for a controlled comparison. The default GUI subprocess
+uses the optimization automatically. The build report records `raster_row_cache`.
+This does not skip source frames or change CPU, timer, interrupt or LCD scheduling.
+It helps repeated BG raster rows; it does not accelerate unrelated normal-renderer
+scenes, remove source decoding costs, or implement sprite/window raster effects.

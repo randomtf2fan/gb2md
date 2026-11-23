@@ -4,7 +4,7 @@
 gb_raster_scanline:
 	tst.b gb_raster_armed
 	beq.w .done
-	movem.l d0-d7/a0-a3,-(sp)
+	movem.l d0-d7/a0-a5,-(sp)
 	move.b gb_io+$40,d0
 	andi.b #$A2,d0
 	cmpi.b #$80,d0
@@ -18,7 +18,7 @@ gb_raster_scanline:
 	clr.w gb_raster_lines
 .check_line:
 	cmp.w gb_raster_lines,d0
-	bne.w .restore                 ; wait for a complete frame beginning at LY0
+	bne.w .restore
 	move.w d0,d5
 	andi.w #7,d5
 	lsl.w #2,d5
@@ -40,30 +40,43 @@ gb_raster_scanline:
 	lea gb_vram+$1C00,a2
 .map_ready:
 	adda.w d0,a2
+	; Exact input equality, never a hash, controls reuse. Resolve map, tile
+	; addressing and fine scroll first; the key is BGP plus 40 plane bytes.
+	move.w #1,-(sp)                 ; dirty input (also forced in A/B mode)
+	ifnd GB2MD_NO_RASTER_CACHE
 	moveq #0,d0
-	move.b gb_io+$47,d0
-	bsr.w gb_raster_select_palette
-	lea gb_2bpp_nibble_table,a1
+	move.b gb_io+$44,d0
+	lea gb_raster_input_valid,a0
+	move.b (a0,d0.w),d1
+	mulu #48,d0
+	lea gb_raster_input_cache,a4
+	adda.w d0,a4
+	tst.b d1
+	beq.s .key_ready
+	move.b gb_io+$47,d1
+	cmp.b (a4),d1
+	bne.s .key_ready
+	clr.w (sp)
+.key_ready:
+	addq.l #2,a4
+	endif
+	lea gb_raster_row_scratch,a5
 	moveq #0,d6
 	move.b gb_io+$43,d6
 	move.w d6,d7
 	lsr.w #3,d7
 	andi.w #7,d6
-	ifd GB2MD_SHOW_FPS
-	move.b #1,gb_fps_vdp_busy
-	endif
-	clr.l -(sp)                    ; ordered rotate/XOR output fingerprint
 	move.w #19,-(sp)
-.tile:
+.fetch_inputs:
 	moveq #0,d0
 	move.b (a2,d7.w),d0
 	bsr.w .fetch_row
 	move.w d0,d2
 	move.w d1,d3
+	tst.w d6
+	beq.s .pixels_ready
 	lsl.w #8,d2
 	lsl.w #8,d3
-	tst.w d6
-	beq.s .aligned
 	move.w d7,d0
 	addq.w #1,d0
 	andi.w #31,d0
@@ -74,14 +87,47 @@ gb_raster_scanline:
 	or.w d1,d3
 	lsl.w d6,d2
 	lsl.w d6,d3
-.aligned:
 	lsr.w #8,d2
 	lsr.w #8,d3
+.pixels_ready:
 	btst #0,gb_io+$40
 	bne.s .background_enabled
 	clr.w d2
 	clr.w d3
 .background_enabled:
+	move.w d2,d0
+	lsl.w #8,d0
+	or.w d3,d0
+	move.w d0,(a5)+
+	ifnd GB2MD_NO_RASTER_CACHE
+	cmp.w (a4)+,d0
+	beq.s .input_equal
+	move.w #1,2(sp)
+.input_equal:
+	endif
+	addq.w #1,d7
+	andi.w #31,d7
+	subq.w #1,(sp)
+	bpl.w .fetch_inputs
+	addq.l #2,sp
+	move.w (sp)+,d1
+	tst.w d1
+	beq.w .reuse
+	moveq #0,d0
+	move.b gb_io+$47,d0
+	bsr.w gb_raster_select_palette
+	lea gb_2bpp_nibble_table,a1
+	lea gb_raster_row_scratch,a5
+	ifd GB2MD_SHOW_FPS
+	move.b #1,gb_fps_vdp_busy
+	endif
+	clr.l -(sp)
+	move.w #19,-(sp)
+.tile:
+	moveq #0,d2
+	moveq #0,d3
+	move.b (a5)+,d2
+	move.b (a5)+,d3
 	moveq #0,d0
 	move.w d5,d0
 	move.l d0,d1
@@ -117,8 +163,6 @@ gb_raster_scanline:
 	move.w d0,$C00000
 	bsr.w .fingerprint
 	addi.w #32,d5
-	addq.w #1,d7
-	andi.w #31,d7
 	subq.w #1,(sp)
 	bpl.w .tile
 	addq.l #2,sp
@@ -128,6 +172,27 @@ gb_raster_scanline:
 	lsl.w #2,d1
 	lea gb_raster_row_hashes,a0
 	move.l d0,(a0,d1.w)
+	ifnd GB2MD_NO_RASTER_CACHE
+	; Publish a valid cache record only after its VDP pixels are written.
+	suba.w #42,a4
+	move.b gb_io+$47,(a4)+
+	clr.b (a4)+
+	lea gb_raster_row_scratch,a5
+	moveq #19,d1
+.save_key:
+	move.w (a5)+,(a4)+
+	dbf d1,.save_key
+	moveq #0,d1
+	move.b gb_io+$44,d1
+	lea gb_raster_input_valid,a0
+	move.b #1,(a0,d1.w)
+	endif
+	addq.l #1,gb_raster_decode_count
+	bra.s .complete
+.reuse:
+	; The dedicated VDP patterns and output fingerprint already match.
+	addq.l #1,gb_raster_reuse_count
+.complete:
 	addq.w #1,gb_raster_lines
 	addq.l #1,gb_raster_capture_count
 	cmpi.w #144,gb_raster_lines
@@ -147,7 +212,7 @@ gb_raster_scanline:
 	move.b #1,gb_bg_dirty
 	move.b #1,gb_video_dirty
 .restore:
-	movem.l (sp)+,d0-d7/a0-a3
+	movem.l (sp)+,d0-d7/a0-a5
 .done:
 	rts
 .fingerprint:

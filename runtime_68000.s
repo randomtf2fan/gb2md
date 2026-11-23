@@ -69,6 +69,11 @@ gb_raster_palette1 equ $FF0092
 gb_raster_palette_valid0 equ $FF0093
 gb_raster_palette_valid1 equ $FF0094
 gb_raster_palette_slot equ $FF0095
+gb_raster_reuse_count equ $FF0098
+gb_raster_decode_count equ $FF009C
+gb_raster_input_cache equ $FFD200 ; 144 x 48 bytes, ends ECFF; serial ends D1FF
+gb_raster_input_valid equ $FFED00 ; 144 validity bytes, cold VRAM must be drawn
+gb_raster_row_scratch equ $FFEE00 ; 40 resolved plane bytes, below host stack
 gb_raster_palette_cache equ $FFC940 ; two sparse 256-byte pixel-pair tables
 gb_raster_row_hashes equ $FFC700 ; 144 ordered output fingerprints, ends C93F
 gb_io equ $FF0100

@@ -5,14 +5,14 @@ from gb_cpu import Memory
 from gb_raster import background_scanline,palette_pair_table,row_fingerprint
 
 
-def fixture(signed=False,unsupported=0,transition=False,static=False):
+def fixture(signed=False,unsupported=0,transition=False,static=False,scx_override=None,mutate=False,zero=False):
     rom=bytearray(0x8000);rom[0x100:0x103]=bytes.fromhex('c35001')
     code=bytearray.fromhex('f331feffafe040e007e041e00feaffff')
     lcdc=0x89 if signed else 0x91
     ids=[0,129,1,255] if signed else [0,1,2,3]
     tiles={}
     for tile in ids:
-        data=bytes(((tile*19+i*73)^0xa6)&255 for i in range(16))
+        data=bytes(16) if zero else bytes(((tile*19+i*73)^0xa6)&255 for i in range(16))
         offset=(0x1000+(tile if tile<128 else tile-256)*16) if signed else tile*16
         tiles[offset]=data;code+=bytes((0x21,offset&255,0x80+(offset>>8)))
         for value in data:code+=bytes((0x3e,value,0x22))
@@ -20,20 +20,27 @@ def fixture(signed=False,unsupported=0,transition=False,static=False):
     code+=bytes((0x21,mapbase&255,0x80+(mapbase>>8)))
     tilemap=bytes(ids[(y+3*x)%4] for y in range(32) for x in range(32))
     for value in tilemap:code+=bytes((0x3e,value,0x22))
-    scx=253 if signed else 3
+    scx=(253 if signed else 3) if scx_override is None else scx_override
     code+=bytes((0x3e,scx,0xe0,0x43,0x3e,lcdc|unsupported,0xe0,0x40))
     code+=bytes.fromhex('3ea5ea00c0af')+bytes.fromhex('ea01c0')
     loop=0x150+len(code)
     def wait(ly):code.extend((0xf0,0x44,0xfe,ly,0x20,0xfa))
     if static:
-        wait(48);code+=bytes.fromhex('3e1be04718fe')
+        wait(48);code+=bytes((0x3e,0 if zero else 0x1b,0xe0,0x47,0x18,0xfe))
     else:
         wait(0);code+=bytes.fromhex('afe0423ee4e047')
         wait(48);code+=bytes.fromhex('3e05e042')
         wait(96);code+=bytes.fromhex('3e1be047')
         wait(112);code+=bytes.fromhex('3e39e047')  # force two-slot palette eviction
         wait(144)
-    if transition:
+    if mutate:
+        # One-time changes after three complete frames: both tile data and map.
+        code+=bytes.fromhex('2101c0347efe03')
+        skip=0x150+len(code)+3+10
+        code+=bytes((0xc2,skip&255,skip>>8))
+        code+=bytes((0x3e,0x5a,0xea,0,0x80,0x3e,ids[1],0xea,mapbase&255,0x80+(mapbase>>8)))
+        code+=bytes((0xc3,loop&255,loop>>8))
+    elif transition:
         code+=bytes.fromhex('2101c0347efe03')
         code+=bytes((0xc2,loop&255,loop>>8))
         code+=bytes((0x3e,lcdc|2,0xe0,0x40,0x18,0xfe))
@@ -42,10 +49,12 @@ def fixture(signed=False,unsupported=0,transition=False,static=False):
     memory=Memory(bytes(rom));memory.io[0x40]=lcdc;memory.io[0x43]=scx
     for offset,data in tiles.items():memory.vram[offset:offset+16]=data
     memory.vram[mapbase:mapbase+1024]=tilemap
+    if mutate:
+        memory.vram[0]=0x5a;memory.vram[mapbase]=ids[1]
     expected=[]
     for y in range(144):
         memory.io[0x42]=0 if static or y<48 else 5
-        memory.io[0x47]=0x1b if static else 0xe4 if y<96 else 0x1b if y<112 else 0x39
+        memory.io[0x47]=(0 if zero else 0x1b) if static else 0xe4 if y<96 else 0x1b if y<112 else 0x39
         expected.append(row_fingerprint(background_scanline(memory,y)))
     return bytes(rom),expected
 
@@ -69,6 +78,27 @@ class RasterBackgroundTests(unittest.TestCase):
         for bits in (2,0x20):
             m.io[0x40]=0x91|bits
             with self.assertRaises(ValueError):background_scanline(m,0)
+
+    def test_builder_reports_cache_mode_and_preserves_it_on_capacity_retry(self):
+        import json,subprocess
+        from unittest.mock import patch
+        import build_recompiled as compiler
+        for enabled in (True,False):
+            with self.subTest(enabled=enabled),tempfile.TemporaryDirectory() as folder:
+                root=Path(folder);rom=bytearray(0x8000);rom[0x100:0x103]=bytes.fromhex('c30001')
+                source=root/'original.gb';source.write_bytes(rom)
+                assembler=root/'assembler';assembler.touch();calls=[]
+                def assemble(command,**kwargs):
+                    calls.append(command)
+                    Path(command[-1]).write_bytes(bytes(0x400002 if len(calls)==1 else 0x80000))
+                    return subprocess.CompletedProcess(command,0,'','')
+                with patch.object(compiler.subprocess,'run',side_effect=assemble):
+                    compiler.build(source,root/'out',2,assembler=assembler,raster_cache=enabled)
+                self.assertGreater(len(calls),1)
+                report=json.loads((root/'out/build-report.json').read_text())
+                self.assertIs(report['raster_row_cache'],enabled)
+                main=(root/'out/recompiled_rom.s').read_text()
+                self.assertEqual('GB2MD_NO_RASTER_CACHE equ 1' in main,not enabled)
 
     @unittest.skipUnless(os.environ.get('GB2MD_NATIVE_TESTS')=='1','opt-in external BlastEm integration')
     def test_native_palette_cache_all_values_and_evictions(self):
@@ -153,3 +183,39 @@ class RasterBackgroundTests(unittest.TestCase):
                 if unsupported or transition or static:
                     self.assertEqual(v.get('FF0083.b'),0,out)
                     self.assertEqual(v.get('FF0086.b'),0,out)
+
+    @unittest.skipUnless(os.environ.get('GB2MD_NATIVE_TESTS')=='1','opt-in external BlastEm integration')
+    def test_native_exact_row_reuse_invalidation_and_cold_zero(self):
+        import json
+        from build_recompiled import build
+        from run_compat_tests import _run_in_pty,_blastem_values
+        cases=[('aligned',dict(scx_override=0)),
+               ('mutated',dict(scx_override=0,mutate=True)),
+               ('cold-zero',dict(scx_override=0,static=True,zero=True))]
+        for name,options in cases:
+            results=[]
+            for enabled in (True,False):
+                with self.subTest(name=name,cache=enabled),tempfile.TemporaryDirectory() as folder:
+                    root=Path(folder);rom,expected=fixture(**options)
+                    source=root/'original.gb';source.write_bytes(rom)
+                    image=build(source,root/'out',150000,raster_cache=enabled)
+                    report=json.loads((root/'out/build-report.json').read_text())
+                    self.assertIs(report['raster_row_cache'],enabled)
+                    query='p/x [$ff2300].b [$ff008c].l [$ff0098].l [$ff009c].l [$ff0018].l [$ff0038].l\n'
+                    addresses=[f'[$ff{0xc700+4*y:04x}].l' for y in range(144)]
+                    query+=''.join('p/x '+' '.join(addresses[i:i+12])+'\n' for i in range(0,144,12))
+                    rc,out,timed=_run_in_pty([os.environ['GB2MD_BLASTEM'],'-d',str(image)],
+                        'binddown "ui.set_speed.4"\nbindup "ui.set_speed.4"\nframes 1400\n'+query+'quit\n',65)
+                    self.assertFalse(timed,out);self.assertEqual(rc,0,out);v=_blastem_values(out)
+                    self.assertEqual(v.get('FF2300.b'),0xa5,out)
+                    self.assertEqual(v.get('FF0018.l'),0,out);self.assertEqual(v.get('FF0038.l'),0,out)
+                    actual=[v.get(f'FF{0xc700+4*y:04X}.l') for y in range(144)]
+                    self.assertEqual(actual,expected,out);results.append(actual)
+                    captured=v['FF008C.l'];reused=v['FF0098.l'];decoded=v['FF009C.l']
+                    self.assertEqual(captured,reused+decoded,out)
+                    self.assertGreaterEqual(decoded,144,out)
+                    if enabled and name!='cold-zero':
+                        self.assertGreater(reused,0,out)
+                        if name=='mutated':self.assertGreater(decoded,144,out)
+                    if not enabled:self.assertEqual(reused,0,out)
+            self.assertEqual(results[0],results[1])

@@ -444,3 +444,11 @@ compiler command. Static scenes return to the normal renderer; raster sprite
 and window composition remain unsupported. This improves effects such as
 palette/scroll-driven video, but is currently slow and can tear. See
 [compatibility results](COMPATIBILITY.md) before assuming complete playback.
+
+
+Raster composition reuses a row only when its full resolved pixel-plane inputs
+and palette match. Tile/map changes and initial empty rows are checked before
+reuse. This is enabled automatically, including GUI builds. For an A/B diagnostic
+build, add `--no-raster-cache`; `build-report.json` records `raster_row_cache`.
+Source timing is unchanged. Rebuild existing outputs to use the optimization;
+it does not make video playback real time or speed up normal-renderer scenes.
