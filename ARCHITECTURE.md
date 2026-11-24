@@ -1407,3 +1407,63 @@ uses the optimization automatically. The build report records `raster_row_cache`
 This does not skip source frames or change CPU, timer, interrupt or LCD scheduling.
 It helps repeated BG raster rows; it does not accelerate unrelated normal-renderer
 scenes, remove source decoding costs, or implement sprite/window raster effects.
+
+## MBC5 ROM bank identity (2026-11-24)
+
+A controller register value is not always the physical ROM bank. In a complete
+64 KiB MBC5 cartridge, for example, selecting $1FD resolves to bank 1 because
+only two bank bits address the four available banks. Bank zero is legal in the
+upper window. The low-byte and ninth-bit registers must still retain their raw
+values across subsequent writes. See [Pan Docs on MBC5](https://github.com/gbdev/pandocs/blob/master/src/MBC5.md)
+and its referenced [MBC1 address-line explanation](https://github.com/gbdev/pandocs/blob/master/src/MBC1.md).
+
+`cartridge_banking.mbc5_rom_bank_mask(rom)` returns a mask only for MBC5 types
+$19–$1E when a standard size code $00–$08 matches the complete backing image.
+It does not reinterpret a truncated dump as a smaller cartridge, or invent a
+mask for unusual non-power-of-two geometry. `physical_rom_bank()` shares this
+resolution with static discovery's `_selected_bank_candidates()`, before
+bounds validation and candidate deduplication. Thus a known $FD write on that
+64 KiB image discovers bank 1 rather than discarding an out-of-range candidate.
+
+`Memory._rom_bank` retains the raw selection. The `Memory.rom_bank` property
+exposes the resolved bank to CPU fetch identity, data reads, DMA and tracing.
+MBC5 register writes merge into the raw latch, preserving the other register.
+`Memory.__setstate__()` migrates older reference snapshots, and
+`exploration_state_key()` includes the raw latch. Physical aliases can share
+compiled instruction entries without losing controller state in snapshots.
+
+The native runtime mirrors this split: `gb_mbc5_rom_latch` at $FF00A0 is the
+nine-bit MBC5 register; `gb_rom_bank` at $FF001E is the resolved bank used by
+ROM reads, DMA and execution-bank normalization. The builder emits
+`gb_mbc5_rom_mask`; resolution occurs on mapper writes, avoiding an extra mask
+on every normal ROM read. Existing bank-dirty boundaries synchronize direct
+chains and dispatch. The raw field applies to MBC5, not other controller types.
+
+For incomplete or irregular MBC5 images, `GB2MD_MBC5_BOUNDED_ROM` enables bounds
+checks using `gb_cart_rom_bytes`. Unbacked data reads return $FF. A bulk DMA
+run stops at the data boundary, then transfers $FF for missing bytes through
+the ordinary DMA schedule. Tests compare the resulting OAM, DIV sample, flags,
+stack and guest-write counts against the reference. This is safe missing-data
+behavior, not complete emulation of unusual multi-chip cartridge wiring.
+
+Build reports expose `mbc5_rom_bank_mask` and `mbc5_bounded_rom`. Python test
+reports include `rom_bank_latch`; native observations also dump $FF001E/$FF00A0.
+No input scenario, title, ROM hash or game address selects this implementation.
+MBC1/MBC3 banking, cartridge RAM/rumble, and native cartridge-size limitations
+retain their previously documented scope; this is a ROM-bank resolution fix.
+
+## Recognized legacy assembler recovery (2026-11-24)
+
+The bundled development vasm 1.8g can crash during branch relaxation while
+printing warning 2058. A local warning-suppression experiment produced invalid
+machine code and was rejected; that diagnostic output was never executed.
+`build()` instead retries once with `-no-opt` only for the recognized SIGSEGV
+(return code -11) plus warning 2058, or the existing layout-convergence failure.
+Unknown errors and repeated failures still stop and preserve the previous ROM.
+
+`assembler_retries`, `assembler_options` and each layout attempt's
+`assembler_optimizations` record the actual mode. Coverage and lowering remain
+unchanged. Normal builds retain optimization; recovered builds may be larger
+and slower, so ordinary size-limit checks still apply. Mock failure tests and
+an actual recovered register/flag/timing fixture verify the fallback. This
+Unix crash signature does not establish Windows recovery coverage.

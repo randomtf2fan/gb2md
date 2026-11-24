@@ -59,3 +59,30 @@ class AssemblerRetryTests(unittest.TestCase):
                     with self.assertRaises(subprocess.CalledProcessError):compiler.build(source,out,20,assembler=assembler)
                 self.assertEqual(run.call_count,attempts)
                 self.assertEqual(previous.read_bytes(),b'preserve previous image')
+
+    def test_legacy_branch_crash_retries_without_suppressing_warnings(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);source,assembler=self.source(root);calls=[]
+            def assemble(command,**kwargs):
+                calls.append(command)
+                if len(calls)==1:
+                    raise subprocess.CalledProcessError(-11,command,output='',stderr='warning 2058 in line 7589 of ')
+                Path(command[-1]).write_bytes(bytes(0x80000))
+                return subprocess.CompletedProcess(command,0,'assembled\n','')
+            with patch.object(compiler,'compile_trace',wraps=compiler.compile_trace) as trace,patch.object(compiler.subprocess,'run',side_effect=assemble):
+                compiler.build(source,root/'out',20,assembler=assembler)
+            self.assertEqual(trace.call_count,1);self.assertEqual(len(calls),2)
+            self.assertIn('-no-opt',calls[1]);self.assertFalse(any(x.startswith('-nowarn') for x in calls[1]))
+            report=json.loads((root/'out/build-report.json').read_text())
+            self.assertIn('2058',report['assembler_retries'][0]['reason'])
+            self.assertFalse(report['native_layout_attempts'][-1]['assembler_optimizations'])
+
+    def test_other_and_repeated_assembler_crashes_fail_and_preserve_image(self):
+        for diagnostic,attempts in [('segmentation fault',1),('warning 20580',1),('warning 2058 in line 7',2)]:
+            with self.subTest(diagnostic=diagnostic),tempfile.TemporaryDirectory() as folder:
+                root=Path(folder);source,assembler=self.source(root);out=root/'out';out.mkdir()
+                previous=out/'recompiled.md';previous.write_bytes(b'previous image')
+                failure=subprocess.CalledProcessError(-11,['assembler'],output='',stderr=diagnostic)
+                with patch.object(compiler.subprocess,'run',side_effect=failure) as run:
+                    with self.assertRaises(subprocess.CalledProcessError):compiler.build(source,out,20,assembler=assembler)
+                self.assertEqual(run.call_count,attempts);self.assertEqual(previous.read_bytes(),b'previous image')

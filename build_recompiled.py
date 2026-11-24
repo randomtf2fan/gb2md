@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Trace, assemble, and checksum a first-stage recompiled Genesis ROM."""
 from __future__ import annotations
-import argparse,json,os,pathlib,shutil,subprocess,struct
+import argparse,json,os,pathlib,re,shutil,subprocess,struct
 from trace_recompiler import compile_trace,parse_input_script,emit_native_blocks
 from color_profiles import COLOR_PROFILES
+from cartridge_banking import mbc5_rom_bank_mask
 
 ROOT=pathlib.Path(__file__).parent
 
@@ -67,7 +68,11 @@ def build(source,out,steps=100000,color_profile="green",input_scripts=(),auto_st
     table=["\teven","gb_2bpp_nibble_table:"]
     for row in range(0,256,8): table.append("\tdc.w "+",".join(f"${v:04X}" for v in chunky[row:row+8]))
     (out/"renderer_table.s").write_text("\n".join(table)+"\n")
+    mbc5_mask=mbc5_rom_bank_mask(rom_data)
+    bounded_mbc5_rom=0x19<=rom_data[0x147]<=0x1E and mbc5_mask is None
     main=f'''gb_mapper_type equ ${rom_data[0x147]:02X}
+gb_mbc5_rom_mask equ ${(mbc5_mask if mbc5_mask is not None else 0x1FF):04X}
+gb_cart_rom_bytes equ ${len(rom_data):X}
 \tinclude "{(out/'color_profile.s').absolute().as_posix()}"
 \tsection rom,code
 \torg $000000
@@ -151,6 +156,7 @@ reset:
 \tmove.b #$4D,gb_l
 \tmove.w #$FFFE,gb_sp
 \tmove.w #1,gb_rom_bank
+\tmove.w #1,gb_mbc5_rom_latch
 \tmove.b #gb_mapper_type,gb_mapper_kind
 \tmove.b #$CF,gb_io
 \tmove.b #$91,gb_io+$40
@@ -177,6 +183,8 @@ gb_cart_rom:
         main=main.replace('\tjmp gb_compiled_entry','\tjsr gb_fps_init\n\tmove.w #$2500,sr\n\tjmp gb_compiled_entry',1)
         main='GB2MD_SHOW_FPS equ 1\n'+main
         main=main.replace('gb_cart_rom:',f'\tinclude "{(ROOT/"fps_overlay_68000.s").as_posix()}"\n\tinclude "{(out/"fps_font.s").absolute().as_posix()}"\n\teven\ngb_cart_rom:')
+    if bounded_mbc5_rom:
+        main="GB2MD_MBC5_BOUNDED_ROM equ 1\n"+main
     if not raster_cache:main="GB2MD_NO_RASTER_CACHE equ 1\n"+main
     if test_serial:main="GB2MD_TEST_SERIAL equ 1\n"+main
     assembly=out/"recompiled_rom.s";assembly.write_text(main)
@@ -193,10 +201,13 @@ gb_cart_rom:
         except subprocess.CalledProcessError as exc:
             assembly_output(exc)
             diagnostic=(exc.stdout or '')+(exc.stderr or '')
-            if not assembler_options and 'maximum number of passes reached' in diagnostic.lower():
+            layout_failure='maximum number of passes reached' in diagnostic.lower()
+            legacy_branch_crash=(exc.returncode==-11 and re.search(r'\bwarning\s+2058\b',diagnostic,re.IGNORECASE))
+            if not assembler_options and (layout_failure or legacy_branch_crash):
                 assembler_options=['-no-opt']
-                assembler_retries.append({'reason':'assembler layout did not converge','options':list(assembler_options)})
-                print('Assembler layout did not converge; retrying once with assembler optimizations disabled (-no-opt). Native code coverage is retained.',flush=True)
+                reason='legacy assembler branch-relaxation crash (warning 2058)' if legacy_branch_crash else 'assembler layout did not converge'
+                assembler_retries.append({'reason':reason,'options':list(assembler_options)})
+                print(f'{reason}; retrying once with assembler optimizations disabled (-no-opt). Native code coverage is retained.',flush=True)
                 continue
             raise
         assembly_output(assembled)
@@ -264,6 +275,8 @@ gb_cart_rom:
     build_report={
         "source":str(source),"coverage_imports":trace_report["coverage_imports"],"fresh_dynamic_unique_block_count":trace_report["fresh_dynamic_unique_block_count"],"steps_per_scenario":steps,"auto_steps":auto_steps,"auto_inputs":auto_inputs,
         "trace_steps_executed":trace_report["total_steps_executed"],
+        "mbc5_rom_bank_mask":mbc5_mask,
+        "mbc5_bounded_rom":bounded_mbc5_rom,
         "test_serial":test_serial,"raster_row_cache":raster_cache,"optimize_pure_chains":optimize_pure_chains,"optimize_hram":optimize_hram,"show_fps":show_fps,
         "dynamic_unique_blocks":trace_report["dynamic_unique_blocks"],
         "banked_pointer_tables":trace_report.get("banked_pointer_tables",[]),

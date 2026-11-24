@@ -297,6 +297,7 @@ def run_python(path: Path, root: Path, max_steps: int, max_frames: int | None,
         "frames": memory.cycles / 70224,
         "elapsed_seconds": round(time.monotonic() - started, 6),
         "rom_bank": memory.rom_bank,
+        "rom_bank_latch": memory._rom_bank,
         "registers": cpu_registers(cpu),
         "ime": cpu.ime,
         "halted": cpu.halted,
@@ -391,7 +392,8 @@ def run_native_blastem(result, source: Path, blastem: Path, frames: int, timeout
         "p/x [$ff0000].w [$ff0002].w [$ff0008].b [$ff0009].b "
         "[$ff000a].b [$ff000b].b [$ff000c].b [$ff000d].b "
         "[$ff000e].b [$ff000f].b [$ff0010].w "
-        "[$ff0018].l [$ff0038].l [$ff0020].l [$ff0081].b\nquit\n"
+        "[$ff0018].l [$ff0038].l [$ff0020].l [$ff0081].b "
+        "[$ff001e].w [$ff00a0].w\nquit\n"
     )
     if micro:
         commands=commands.replace("quit\n","p/x [$ff0180].b [$ff0181].b [$ff0182].b\nquit\n")

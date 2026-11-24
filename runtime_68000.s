@@ -18,6 +18,7 @@ gb_write_count equ $FF0014
 gb_ei_delay equ $FF001C
 gb_halted equ $FF001D
 gb_rom_bank equ $FF001E
+gb_mbc5_rom_latch equ $FF00A0 ; raw nine-bit latch; gb_rom_bank is physical
 gb_cycle_counter equ $FF0020
 gb_div_accum equ $FF0024
 gb_timer_accum equ $FF0026
@@ -226,18 +227,37 @@ gb_read8:
 	lsl.l #3,d2
 	adda.l d2,a0
 .rom0_read_data:
+	ifd GB2MD_MBC5_BOUNDED_ROM
+	moveq #0,d2
+	move.w d1,d2
+	bra.s .mbc5_bounded_rom_read
+	else
 	move.b (a0,d1.w),d0
 	rts
+	endif
 .romx_read:
 	moveq #0,d2
 	move.w gb_rom_bank,d2
 	lsl.l #8,d2
 	lsl.l #6,d2
 	subi.w #$4000,d1
+	ifd GB2MD_MBC5_BOUNDED_ROM
+	andi.l #$FFFF,d1
+	add.l d1,d2
+.mbc5_bounded_rom_read:
+	cmpi.l #gb_cart_rom_bytes,d2
+	bhs.s .mbc5_rom_absent
+	lea gb_cart_rom,a0
+	adda.l d2,a0
+	move.b (a0),d0
+.mbc5_rom_absent:
+	rts
+	else
 	lea gb_cart_rom,a0
 	adda.l d2,a0
 	move.b (a0,d1.w),d0
 	rts
+	endif
 .vram_read:
 	subi.w #$8000,d1
 	lea gb_vram,a0
@@ -475,16 +495,20 @@ gb_write8:
 	cmpi.w #$3000,d1
 	bhs.s .mbc5_rom_high
 	andi.w #$00FF,d0
-	andi.w #$0100,gb_rom_bank
-	or.w d0,gb_rom_bank
-	rts
+	andi.w #$0100,gb_mbc5_rom_latch
+	or.w d0,gb_mbc5_rom_latch
+	bra.s .mbc5_publish_rom_bank
 .mbc5_rom_high:
 	cmpi.w #$4000,d1
 	bhs.s .mbc5_ram_bank
 	andi.w #1,d0
 	lsl.w #8,d0
-	andi.w #$00FF,gb_rom_bank
-	or.w d0,gb_rom_bank
+	andi.w #$00FF,gb_mbc5_rom_latch
+	or.w d0,gb_mbc5_rom_latch
+.mbc5_publish_rom_bank:
+	move.w gb_mbc5_rom_latch,d0
+	andi.w #gb_mbc5_rom_mask,d0
+	move.w d0,gb_rom_bank
 	rts
 .mbc5_ram_bank:
 	cmpi.w #$6000,d1
@@ -1706,7 +1730,9 @@ gb_dma_advance:
 	subq.w #1,d5
 	bra.w .dma_event_loop
 
-; Copy d3.w consecutive bytes from the current source/index. d3 is preserved.
+; Copy up to d3.w bytes from the source/index. A bounded partial ROM may
+; shorten d3 to the bytes copied; the event loop charges the remaining bytes
+; separately. Normal complete-ROM runs preserve d3.
 .dma_copy_run:
 	moveq #0,d1
 	move.b gb_dma_source,d1
@@ -1719,7 +1745,11 @@ gb_dma_advance:
 	cmpi.w #$00A0,d2
 	bhs.w .dma_run_eram
 	cmpi.w #$0080,d2
+	ifd GB2MD_MBC5_BOUNDED_ROM
+	bhs.w .dma_run_vram
+	else
 	bhs.s .dma_run_vram
+	endif
 	cmpi.w #$0040,d2
 	bhs.s .dma_run_romx
 	lea gb_cart_rom,a0
@@ -1736,18 +1766,43 @@ gb_dma_advance:
 	lsl.l #3,d2
 	adda.l d2,a0
 .dma_run_rom0_ready:
+	ifd GB2MD_MBC5_BOUNDED_ROM
+	moveq #0,d2
+	move.w d1,d2
+	bra.w .dma_mbc5_bounded_rom
+	else
 	adda.w d1,a0
 	bra.w .dma_run_copy
+	endif
 .dma_run_romx:
 	moveq #0,d2
 	move.w gb_rom_bank,d2
 	lsl.l #8,d2
 	lsl.l #6,d2
 	subi.w #$4000,d1
+	ifd GB2MD_MBC5_BOUNDED_ROM
+	andi.l #$FFFF,d1
+	add.l d1,d2
+.dma_mbc5_bounded_rom:
+	cmpi.l #gb_cart_rom_bytes,d2
+	bhs.w .dma_run_fill_ff
+	move.l #gb_cart_rom_bytes,d1
+	sub.l d2,d1
+	moveq #0,d0
+	move.w d3,d0
+	cmp.l d0,d1
+	bhs.s .dma_mbc5_rom_available
+	move.w d1,d3               ; end the run at the backing-data boundary
+.dma_mbc5_rom_available:
+	lea gb_cart_rom,a0
+	adda.l d2,a0
+	bra.w .dma_run_copy
+	else
 	lea gb_cart_rom,a0
 	adda.l d2,a0
 	adda.w d1,a0
 	bra.s .dma_run_copy
+	endif
 .dma_run_vram:
 	subi.w #$8000,d1
 	lea gb_vram,a0

@@ -6,6 +6,7 @@ also the semantic reference for the future generated 68000 runtime.
 """
 from __future__ import annotations
 from collections import Counter
+from cartridge_banking import mbc5_rom_bank_mask
 
 Z, N, H, C = 0x80, 0x40, 0x20, 0x10
 
@@ -85,10 +86,27 @@ class Memory:
         # Active-low: bits 0-3 are Right/Left/Up/Down and bits 4-7 are
         # A/B/Select/Start.  Tests and trace discovery can inject input here.
         self.joypad_state = 0xFF
+        mask = mbc5_rom_bank_mask(rom)
+        self.rom_bank_mask = 0xFFFF if mask is None else mask
         self.mapper = rom[0x147]; self.rom_bank = 1; self.ram_bank = 0; self.ram_enabled = False; self.mbc1_mode = 0
         ram_sizes={0:0,1:0x800,2:0x2000,3:0x8000,4:0x20000,5:0x10000}; self.eram=bytearray(ram_sizes.get(rom[0x149],0))
         self.cycles = 0
         self.stat_line = False
+    @property
+    def rom_bank(self):
+        # Execution identity and CPU/DMA reads use connected address lines.
+        return self._rom_bank & self.rom_bank_mask
+    @rom_bank.setter
+    def rom_bank(self, value):
+        self._rom_bank = value
+    def __setstate__(self, state):
+        # Retain reference snapshots written before ROM selection was split
+        # into a register latch and a physical bank.
+        state = dict(state)
+        state['_rom_bank'] = state.pop('rom_bank', state.get('_rom_bank', 1))
+        mask = mbc5_rom_bank_mask(state['rom'])
+        state['rom_bank_mask'] = 0xFFFF if mask is None else mask
+        self.__dict__.update(state)
     def read(self, a):
         a &= 0xFFFF
         if a < 0x4000: return self.rom[a] if a < len(self.rom) else 0xFF
@@ -174,8 +192,8 @@ class Memory:
             elif a < 0x6000:self.ram_bank=v&3 # RTC selections are added by the timer layer
         elif self.mapper in range(0x19,0x1F):
             if a < 0x2000:self.ram_enabled=(v&15)==10
-            elif a < 0x3000:self.rom_bank=(self.rom_bank&0x100)|v
-            elif a < 0x4000:self.rom_bank=((v&1)<<8)|(self.rom_bank&0xFF)
+            elif a < 0x3000:self.rom_bank=(self._rom_bank&0x100)|v
+            elif a < 0x4000:self.rom_bank=((v&1)<<8)|(self._rom_bank&0xFF)
             elif a < 0x6000:self.ram_bank=v&15
     def _timer_signal(self, counter=None, tac=None):
         counter=self.div_counter if counter is None else counter

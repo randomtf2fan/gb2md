@@ -452,3 +452,17 @@ reuse. This is enabled automatically, including GUI builds. For an A/B diagnosti
 build, add `--no-raster-cache`; `build-report.json` records `raster_row_cache`.
 Source timing is unchanged. Rebuild existing outputs to use the optimization;
 it does not make video playback real time or speed up normal-renderer scenes.
+
+
+MBC5 ROM-bank selection now resolves physical aliases consistently in tracing
+and native execution while preserving the full nine-bit register. The GUI
+uses this automatically; restart it and rebuild existing outputs. Standard
+complete images use their connected bank bits. Incomplete MBC5 data reads are
+bounds-checked instead of silently wrapping or reading beyond the embedded
+ROM. Nonstandard cartridge wiring, other mapper types, RAM/rumble and the
+current native 4 MiB image limit retain their documented limitations.
+
+A recognized old-vasm branch-relaxation crash can trigger one recorded `-no-opt`
+retry. Warnings are not suppressed, and other/repeated errors still fail.
+See [the implementation guide](ARCHITECTURE.md) and
+[measured compatibility](COMPATIBILITY.md) for validation and remaining gaps.

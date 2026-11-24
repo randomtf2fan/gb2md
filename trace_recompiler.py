@@ -15,6 +15,7 @@ from bank_analysis import fixed_bank_context_targets
 from ram_callback_analysis import RamCallbackAnalyzer
 from serial_test import SerialTestMemory
 from coverage_profiles import load_coverage_profiles, merge_coverage_profiles
+from cartridge_banking import physical_rom_bank
 
 REGS=("gb_b","gb_c","gb_d","gb_e","gb_h","gb_l",None,"gb_a")
 REGS16=("gb_b","gb_d","gb_h","gb_sp")
@@ -69,6 +70,7 @@ def exploration_state_key(cpu):
                               cpu.sp,cpu.pc,cpu.ime,cpu.halted,cpu.ei_delay,cpu.halt_bug,memory.ie))
     digest.update(struct.pack(">5I",memory.rom_bank,memory.ram_bank,memory.ram_enabled,
                               memory.mbc1_mode,memory.cycles%70224))
+    digest.update(struct.pack('>I', memory._rom_bank))
     digest.update(struct.pack(">3I",memory.div_counter,memory.timer_reload_delay,
                               memory.timer_reloaded_this_cycle))
     digest.update(struct.pack(">2H5B",
@@ -101,6 +103,7 @@ def _selected_bank_candidates(rom,value,address):
     elif 0x0F<=mapper<=0x13 and 0x2000<=address<0x4000:banks=[(value&127) or 1]
     elif 0x19<=mapper<=0x1E and 0x2000<=address<0x3000:banks=[value,value|0x100]
     else:return []
+    banks = dict.fromkeys(physical_rom_bank(rom, bank) for bank in banks)
     return [bank for bank in banks if bank*0x4000<len(rom)]
 
 def _shadow_store_end(rom,pc,end):

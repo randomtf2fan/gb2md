@@ -1,5 +1,64 @@
 # GB2MD compatibility status
 
+## MBC5 ROM-bank resolution — completed 2026-11-24
+
+Six previously failing MBC5 ROM-size tests now PASS in both the Python model
+and native Genesis execution. The fix separates the nine-bit register latch
+from the physical bank addressed by a complete standard-size ROM. CPU reads,
+DMA, trace identity, static bank candidates and native dispatch agree, including
+upper-window bank zero. No game-specific rules or interpreter were introduced.
+Incomplete MBC5 dumps are not falsely mirrored; native data/DMA reads are
+bounded and missing bytes read as $FF. Unusual cartridge wiring and MBC1/MBC3
+behavior retain their documented scope. See [the design](ARCHITECTURE.md).
+
+Final validation, completed across the interrupted Nov23–24 session:
+
+- **288/288 unit methods PASS with native integrations enabled**, no skipped
+  methods or external test retries. The public fast run is240PASS/48native skips.
+- **49/49 real fixtures PASS in Python and native execution**: the established
+  43 plus six newly fixed MBC5 cases. All eight available MBC5 ROM-size tests
+  PASS in Python; the4MiB/8MiB source cases have no native verification under
+  the current4MiB output limit.
+- Primary Mooneye115: **63PASS /21FAIL /4TIMEOUT /24UNSUPPORTED /3NOT_RUN**.
+  The prior result was57PASS/27FAIL; all other120 results in the126-ROM
+  reference survey are unchanged. Blargg individual CPU11PythonPASS;
+  native CPU results remain NOT_RUN.
+- Deduplicated129-ROM matrix: **77PythonPASS /21FAIL /4TIMEOUT /
+  24UNSUPPORTED /3NOT_RUN**; **49nativePASS /80NOT_RUN**. Overlapping datasets
+  are not added twice. Remaining21 failures are8MBC1,9PPU,3boot/I/O and1serial.
+- Original fixtures cover raw-register merges/snapshots, aliases and bank-zero
+  calls in tree/windowed dispatch, static closure, flags/SP/writecounts/DIV,
+  all160OAM bytes and partial lower/upper ROM data/DMA boundaries.
+- Tetris14,942-Genesis-frame replay reaches score40, GAME OVER and menu with
+  no traps; all39 viewport captures match the prior build. No fresh line clear
+  or physical-hardware result is claimed.
+- The unchanged video-regression budget of72,002Genesis frames advances29.02349
+  source seconds versus29.02361 previously, with20distinct viewport captures,
+  bank7 and zero traps. This preserves observed animation/throughput; it is
+  not full clip/audio/hardware verification or a speed improvement claim.
+- The near4MiB graph fits4,193,604bytes (700spare), retains550faststubs and its
+  exact previous block list, with normal assembler optimization. This is a
+  capacity check, not fresh Pokemon gameplay validation.
+- The public offscreen GUI builds an original MBC5 fixture through the updated
+  backend, reports mask3, cancels correctly and restores controls. The folder
+  target is checked with a mocked desktop opener. Windows was not freshly tested.
+
+Validation exposed a real legacy vasm1.8g branch-relaxation crash. A narrow,
+recorded one-time `-no-opt` retry handles SIGSEGV plus warning2058, alongside
+existing convergence recovery. Unknown/repeated errors still fail and preserve
+previous ROMs. Warning suppression was rejected after a diagnostic experiment
+produced invalid machine code; that output was never executed. Original failure
+evidence is retained and the recovered real fixture matches independent Python
+observations. Normal builds retain assembler optimization.
+
+A restart interrupted unfinished verification. Frozen-source hashes and52ROM
+checksums remained valid;288unit passes and29native fixture passes were retained,
+the remaining20native checks resumed, and video playback restarted into a
+separate results folder. All15 protected checkpoints and5,100fixture files are
+unchanged. Native tests used isolated displays; no assets or generated binaries
+are distributed. The next mapper target is MBC1 mode/latch/lower-window behavior.
+
+
 ## Broader compatibility retest — 2026-11-23
 
 Compiler/runtime source is unchanged from `46fee65`. Fresh unit testing with
