@@ -1467,3 +1467,48 @@ unchanged. Normal builds retain optimization; recovered builds may be larger
 and slower, so ordinary size-limit checks still apply. Mock failure tests and
 an actual recovered register/flag/timing fixture verify the fallback. This
 Unix crash signature does not establish Windows recovery coverage.
+
+## Standard MBC1 register state and both ROM windows
+
+`cartridge_banking.mbc1_rom_bank_mask()` recognizes complete, power-of-two
+MBC1 images matching their size header, up to 2 MiB. It does not infer multicart
+wiring from cartridge size or game identity. Malformed/truncated images retain
+the earlier mapping scope; this change does not make missing bytes into a
+smaller cartridge.
+
+For these standard cartridges, `Memory._rom_bank` retains the raw upper two
+and lower five register bits. `Memory.rom_bank` applies the lower-register
+zero-to-one rule **before** masking disconnected ROM address lines. Consequently,
+a nonzero selection can address physical bank zero on a small cartridge.
+Both banking modes retain the upper register's effect on the upper ROM window;
+mode one also exposes it in the lower ROM window. `Memory.rom0_bank` and
+`Memory.bank_for_address()` provide that second mapping and the CPU's physical
+execution identity. CPU reads, DMA source reads, and `CPU.last_bank` agree.
+RAM mode changes immediately select the appropriate bank, while disconnected
+RAM bank/address lines mirror 8 KiB/2 KiB RAM and disabled/absent RAM reads $FF.
+Snapshot restoration migrates earlier latch layouts; state deduplication keeps
+the raw register so future bank writes are not conflated.
+
+The native builder emits MBC1 geometry constants only for the recognized
+cartridges. `gb_mbc1_low` ($FF00A4) and `gb_mbc1_upper` hold the raw registers;
+`gb_rom_bank` ($FF001E) and `gb_rom0_bank` ($FF00A2) hold resolved physical banks.
+Mapper writes publish both mappings. `gb_normalize_bank()`, direct/dynamic
+control transfers, interrupt vectors, CPU reads and DMA consume them. Additional
+lower-window control code is assembled only where the ROM has those address
+lines; other mappers retain their previous runtime paths.
+
+`compile_trace()` records observed lower mappings as well as the existing upper
+contexts. Direct closure within a remapped lower window uses its physical ROM
+bytes; observed cross-window branches use their observed lower mapping. Unknown
+large-MBC1 lower mappings are left unresolved rather than guessed as bank zero.
+Non-padding interrupt vectors from legal lower banks are closure roots. The
+specialized fixed-ROM pointer recognizers are deliberately skipped for remapped
+lower-window entries: extending those proofs safely remains future work.
+Coverage imports validate physical lower-window identities against cartridge
+bytes. Windowed dispatch uses 128-page nonzero-bank directories only when its
+block graph actually contains remapped lower entries; ordinary upper-only graphs
+keep the existing 64-page layout.
+
+This is standard MBC1 support, not MBC1M multicart detection, exhaustive bank-state
+analysis, or proof of complete gameplay coverage. The wiring and zero-translation
+rules follow [Pan Docs' MBC1 description](https://gbdev.io/pandocs/MBC1.html).

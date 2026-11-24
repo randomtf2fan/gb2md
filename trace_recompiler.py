@@ -15,7 +15,7 @@ from bank_analysis import fixed_bank_context_targets
 from ram_callback_analysis import RamCallbackAnalyzer
 from serial_test import SerialTestMemory
 from coverage_profiles import load_coverage_profiles, merge_coverage_profiles
-from cartridge_banking import physical_rom_bank
+from cartridge_banking import physical_rom_bank, mbc1_rom_bank_mask
 
 REGS=("gb_b","gb_c","gb_d","gb_e","gb_h","gb_l",None,"gb_a")
 REGS16=("gb_b","gb_d","gb_h","gb_sp")
@@ -177,7 +177,7 @@ def _constant_far_setup(rom,bank,pc):
     for _ in range(16):
         if pc in visited or not low<=pc<high or abs(pc-start)>128:return None
         visited.add(pc)
-        offset=pc if pc<0x4000 else bank*0x4000+pc-0x4000
+        offset=bank*0x4000+(pc&0x3fff)
         if not 0<=offset<len(rom):return None
         op=rom[offset];size=instruction_length(op)
         if pc+size>high or offset+size>len(rom):return None
@@ -524,6 +524,11 @@ def parse_input_script(spec: str):
         events.append((start,start+duration,state))
     if not events and not memory_events:raise ValueError("input script contains no events")
     return {"name":spec,"events":events,"memory_events":memory_events}
+def native_target_bank(target):
+    if 0x4000<=target<0x8000:return ["move.w gb_rom_bank,gb_bank"]
+    if target>=0x8000:return ["clr.w gb_bank"]
+    return ["ifd GB2MD_MBC1_LOWER_BANKING","move.w gb_rom0_bank,gb_bank","else","clr.w gb_bank","endif"]
+
 def native_body(block,optimize_hram=True):
     """Return direct 68000 statements for semantics already safe to lower."""
     op,operand,pc,bank=block["opcode"],block["operand"],block["pc"],block["bank"]
@@ -717,15 +722,15 @@ def native_body(block,optimize_hram=True):
         elif op==0x3A: body.append("subq.w #1,gb_h")
     elif fam=="JP":
         nextpc=operand
-        body.append("move.w gb_rom_bank,gb_bank" if 0x4000<=operand<0x8000 else "clr.w gb_bank")
+        body += native_target_bank(operand)
     elif fam=="JP_CC":
         target=operand; cond=(op>>3)&3; bit=7 if cond<2 else 4
         branch=("beq.s","bne.s","beq.s","bne.s")[cond]
         body += [f"move.w #${nextpc:04X},gb_pc",f"btst #{bit},gb_f",f"{branch} .jptaken_{stem}","jmp gb_dispatch",f".jptaken_{stem}:",f"move.b #{taken_cost},gb_step_cycles"]
         nextpc=target
-        body.append("move.w gb_rom_bank,gb_bank" if 0x4000<=target<0x8000 else "clr.w gb_bank")
+        body += native_target_bank(target)
     elif fam=="JP_HL":
-        body += ["move.w gb_h,gb_pc","cmpi.w #$4000,gb_h",f"blo.s .jphlfixed_{stem}","cmpi.w #$8000,gb_h",f"bhs.s .jphlfixed_{stem}","move.w gb_rom_bank,gb_bank",f"bra.s .jphlready_{stem}",f".jphlfixed_{stem}:","clr.w gb_bank",f".jphlready_{stem}:","jmp gb_dispatch"]
+        body += ["move.w gb_h,gb_pc","cmpi.w #$4000,gb_h",f"blo.s .jphlfixed_{stem}","cmpi.w #$8000,gb_h",f"bhs.s .jphlfixed_{stem}","move.w gb_rom_bank,gb_bank",f"bra.s .jphlready_{stem}",f".jphlfixed_{stem}:","clr.w gb_bank",f".jphlready_{stem}:","ifd GB2MD_MBC1_LOWER_BANKING","jsr gb_normalize_bank","endif","jmp gb_dispatch"]
         return body
     elif fam=="JR":
         delta=(operand&255)-256 if operand&128 else operand&255; nextpc=(nextpc+delta)&0xFFFF
@@ -745,22 +750,22 @@ def native_body(block,optimize_hram=True):
     elif fam in ("CALL","RST"):
         target=operand if fam=="CALL" else (op&0x38)
         body += push_word([f"move.l #${nextpc:04X},d3"])
-        body += ["move.w gb_rom_bank,gb_bank" if 0x4000<=target<0x8000 else "clr.w gb_bank"]
+        body += native_target_bank(target)
         nextpc=target
     elif fam=="CALL_CC":
         target=operand;cond=(op>>3)&3;bit=7 if cond<2 else 4;branch=("beq.s","bne.s","beq.s","bne.s")[cond]
         body += [f"btst #{bit},gb_f",f"{branch} .calltaken_{stem}",f"move.w #${nextpc:04X},gb_pc","jmp gb_dispatch",f".calltaken_{stem}:",f"move.b #{taken_cost},gb_step_cycles"]
         body += push_word([f"move.l #${nextpc:04X},d3"])
-        body += ["move.w gb_rom_bank,gb_bank" if 0x4000<=target<0x8000 else "clr.w gb_bank"]
+        body += native_target_bank(target)
         nextpc=target
     elif fam in ("RET","RETI"):
         body += pop_word()+["move.w d3,gb_pc","cmpi.w #$4000,d3",f"blo.s .retfixed_{stem}","cmpi.w #$8000,d3",f"bhs.s .retfixed_{stem}","move.w gb_rom_bank,gb_bank",f"bra.s .retbank_{stem}",f".retfixed_{stem}:","clr.w gb_bank",f".retbank_{stem}:"]
         if fam=="RETI": body += ["move.b #1,gb_ime","clr.b gb_ei_delay"]
-        body.append("jmp gb_dispatch"); return body
+        body += ["ifd GB2MD_MBC1_LOWER_BANKING","jsr gb_normalize_bank","endif","jmp gb_dispatch"]; return body
     elif fam=="RET_CC":
         cond=(op>>3)&3; bit=7 if cond<2 else 4; branch=("beq.s","bne.s","beq.s","bne.s")[cond]
         body += [f"btst #{bit},gb_f",f"{branch} .rettaken_{stem}",f"move.w #${nextpc:04X},gb_pc","jmp gb_dispatch",f".rettaken_{stem}:",f"move.b #{taken_cost},gb_step_cycles"]
-        body += pop_word(12)+["move.w d3,gb_pc","cmpi.w #$4000,d3",f"blo.s .retccfixed_{stem}","cmpi.w #$8000,d3",f"bhs.s .retccfixed_{stem}","move.w gb_rom_bank,gb_bank",f"bra.s .retccbank_{stem}",f".retccfixed_{stem}:","clr.w gb_bank",f".retccbank_{stem}:","jmp gb_dispatch"]
+        body += pop_word(12)+["move.w d3,gb_pc","cmpi.w #$4000,d3",f"blo.s .retccfixed_{stem}","cmpi.w #$8000,d3",f"bhs.s .retccfixed_{stem}","move.w gb_rom_bank,gb_bank",f"bra.s .retccbank_{stem}",f".retccfixed_{stem}:","clr.w gb_bank",f".retccbank_{stem}:","ifd GB2MD_MBC1_LOWER_BANKING","jsr gb_normalize_bank","endif","jmp gb_dispatch"]
         return body
     elif fam=="PUSH_RR":
         pair=REGS16[(op>>4)&3] if op!=0xF5 else "gb_a"
@@ -770,6 +775,7 @@ def native_body(block,optimize_hram=True):
         body += pop_word()+[f"move.w d3,{pair}"]
         if op==0xF1: body.append("andi.b #$F0,gb_f")
     else:return None
+    if fam in ("JR","JR_CC") and pc//0x4000!=nextpc//0x4000:body += native_target_bank(nextpc)
     body += [f"move.w #${nextpc:04X},gb_pc","jmp gb_dispatch"]
     return body
 
@@ -798,6 +804,8 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
     rom=rom_path.read_bytes();hits=collections.Counter();first={};observed=collections.defaultdict(collections.Counter);scenario_reports=[];dynamic_values=collections.defaultdict(set)
     imported_profiles=load_coverage_profiles(rom,coverage_profiles)
     observed_banks=collections.defaultdict(set)
+    observed_lower_banks=collections.defaultdict(set)
+    mbc1_lower_banking=(mbc1_rom_bank_mask(rom) or 0)>=32
     input_candidates=[];candidate_keys=set();candidate_last_frame={};sweep_start=None
     def capture_input_state(cpu,memory,origin,target,depth=0,limit=None,interval=None):
         if not auto_inputs or not reads_joypad(cpu,memory):return
@@ -819,13 +827,14 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
         if suppressed:
             if pc>=0x8000:
                 raise ValueError(f"HALT suppressed fetch in writable code at ${pc:04X} is not yet supported")
-            offset=pc if pc<0x4000 else bank*0x4000+pc-0x4000
+            offset=bank*0x4000+(pc&0x3fff)
             normal=rom[offset:offset+instruction_length(raw[0])]
             limit=0x4000 if pc<0x4000 else 0x8000
             if len(normal)!=instruction_length(raw[0]) or pc+len(normal)>limit or raw!=normal[:1]+normal[:len(normal)-1]:
                 raise ValueError(f"unsupported HALT ROM fetch boundary at ${bank:02X}:${pc:04X}")
             halt_observed[key][raw]+=1;raw=normal
         observed_banks[key].add(memory.rom_bank)
+        observed_lower_banks[key].add(memory.rom0_bank)
         observed[key][raw]+=1
         if key not in scenario_keys:
             first.setdefault(key,raw);scenario_keys.add(key)
@@ -891,7 +900,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
             exploration_report['sweep_new_blocks']=new_blocks
             exploration_report['branches'].append({'kind':'sweep','depth':0,'action':'varied-start-a',
                 'source_frame':start_frame,'steps':limit,'new_blocks':new_blocks,
-                'end_pc':cpu.pc,'end_bank':memory.rom_bank if 0x4000<=cpu.pc<0x8000 else 0,
+                'end_pc':cpu.pc,'end_bank':memory.bank_for_address(cpu.pc),
                 'press_count':policy.press_count,'stop_reason':'input safety limit reached' if limit<input_sweep_steps else 'sweep instruction limit reached'})
             # Continue ordinary exploration from recent progressed input states.
             # Macro timing is discovery-only; native code still polls real pads.
@@ -909,7 +918,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
                     capture_input_state(cpu,memory,branch_origin,local_candidates,depth+1,limit=16,interval=1)
                     trace_step(cpu,memory,exploration_keys);executed+=1
                 new_blocks=len(first)-before;exploration_report["branches_executed"]+=1;exploration_report["steps_executed"]+=executed
-                exploration_report["branches"].append({"depth":depth,"action":action_name,"source_frame":snapshot_frame,"steps":executed,"new_blocks":new_blocks,"end_pc":cpu.pc,"end_bank":memory.rom_bank if 0x4000<=cpu.pc<0x8000 else 0})
+                exploration_report["branches"].append({"depth":depth,"action":action_name,"source_frame":snapshot_frame,"steps":executed,"new_blocks":new_blocks,"end_pc":cpu.pc,"end_bank":memory.bank_for_address(cpu.pc)})
                 if new_blocks:
                     print(f"auto-input branch {exploration_report['branches_executed']}: depth={depth} action={action_name} +{new_blocks} blocks",flush=True)
                     if depth<input_max_depth:
@@ -943,7 +952,12 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
     expanded=set();indirect_table_targets=set();hl_table_targets=set();rst_table_targets=set();banked_thunk_targets=set();constant_bank_targets=set();far_table_targets=set();bank_context_targets=set();far_table_reports=[];far_call_targets=set();far_call_returns=set();bitmask_targets=set()
     def rom_key(source_key,address):
         address &= 0xFFFF;source_bank,source_pc=source_key
-        if address < 0x4000:return (0,address)
+        if address < 0x4000:
+            if source_pc<0x4000:return (source_bank,address)
+            if mbc1_lower_banking:
+                contexts=observed_lower_banks.get(source_key,set())
+                return (next(iter(contexts)),address) if len(contexts)==1 else None
+            return (0,address)
         # ROM-only cartridges have a fixed upper window even when the
         # branch originates in the lower window. No bank-state inference
         # is needed (or safe to assume for banked cartridges).
@@ -954,8 +968,8 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
     def add_rom_block(key):
         if key is None or key in first:return
         bank,pc=key
-        if pc < 0x4000:offset=pc;limit=0x4000
-        elif pc < 0x8000 and (bank or 0x19<=rom[0x147]<=0x1E):offset=bank*0x4000+pc-0x4000;limit=0x8000
+        if pc < 0x4000:offset=bank*0x4000+pc;limit=0x4000
+        elif pc < 0x8000 and (bank or (mbc1_rom_bank_mask(rom) is not None and mbc1_rom_bank_mask(rom)<31) or 0x19<=rom[0x147]<=0x1E):offset=bank*0x4000+pc-0x4000;limit=0x8000
         elif 0xFF80 <= pc < 0xFFFF:
             values=dynamic_values.get(pc)
             if not values or len(values)!=1 or next(iter(values)) in (0x00,0xFF):return
@@ -1036,8 +1050,14 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
     # Interrupt entry is asynchronous and target timing can take a vector that
     # a finite reference trace did not. Compile every non-padding cartridge
     # vector independently of whether the oracle happened to service it.
-    for vector in (0x40,0x48,0x50,0x58,0x60):
-        if vector < len(rom) and rom[vector] not in (0x00,0xFF):add_rom_block((0,vector))
+    vector_banks={0}
+    if mbc1_lower_banking:
+        mask=mbc1_rom_bank_mask(rom)
+        vector_banks.update(bank&mask for bank in (32,64,96))
+    for bank in sorted(vector_banks):
+        for vector in (0x40,0x48,0x50,0x58,0x60):
+            offset=bank*0x4000+vector
+            if offset < len(rom) and rom[offset] not in (0x00,0xFF):add_rom_block((bank,vector))
     ram_callback_analyzer=RamCallbackAnalyzer(rom,_selected_bank_candidates)
     ram_callback_targets=set();ram_callback_returns=set();ram_callback_report={}
     indexed_call_targets=set();indexed_call_returns=set();indexed_call_reports=[];inline_offset_tables=[]
@@ -1088,7 +1108,7 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
             # In that convention the bytes after RST are data, not executable
             # fallthrough. Require the exact handler and at least two bounded,
             # valid pointers before suppressing ordinary RST fallthrough.
-            rst_candidates=bounded_pointer_table(key,fall) if is_inline_rst_dispatch(rom,vector) else []
+            rst_candidates=bounded_pointer_table(key,fall) if not (bank and pc<0x4000) and is_inline_rst_dispatch(rom,vector) else []
             if len(rst_candidates)>=2:
                 successors=[vector]
                 for target_key in rst_candidates:
@@ -1110,7 +1130,11 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
         elif fam in ("RET_CC",):successors=[fall]
         elif fam not in ("RET","RETI","JP_HL","HALT","STOP","INVALID","UNCLASSIFIED"):
             successors=[fall]
-        for address in successors:add_rom_block(rom_key(key,address))
+        for address in successors:
+            add_rom_block(rom_key(key,address))
+            if mbc1_lower_banking and pc>=0x4000 and address<0x4000:
+                for lower_bank in observed_lower_banks.get(key,()):add_rom_block((lower_bank,address))
+        if bank and pc<0x4000:continue  # Specialized recognizers require fixed ROM0.
         if op==0x11:
             tagged_diagnostic={}
             for target_key in tagged_callback_table(rom,bank,pc,diagnostics=tagged_diagnostic):
@@ -1275,6 +1299,7 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
     used=sorted({b["family"] for b in blocks if not b["native_lowered"]})
     label=lambda b:f"L_gb_B{b['bank']:03X}_{b['pc']:04X}"
     block_by_key={(b["bank"],b["pc"]):b for b in blocks}
+    lower_banked_graph=any(b["bank"] and b["pc"]<0x4000 for b in blocks)
     lower=lambda block:native_body(block,optimize_hram=optimize_hram)
     chain_targets=set();incoming_costs=collections.defaultdict(set);source_edges=collections.defaultdict(set)
     def pure_cycles(block,body):
@@ -1301,7 +1326,10 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
                 current_target=None;current_store_index=None
             target_key=None
             if current_target is not None:
-                if not 0x4000<=current_target<0x8000:target_key=(0,current_target)
+                if current_target<0x4000:
+                    if block['pc']<0x4000:target_key=(block['bank'],current_target)
+                    elif not lower_banked_graph:target_key=(0,current_target)
+                elif current_target>=0x8000:target_key=(0,current_target)
                 elif 0x4000<=block["pc"]<0x8000:target_key=(block["bank"],current_target)
                 # Fixed-ROM callers have no proven active cartridge bank.
                 # One observed target is coverage, not a bank invariant.
@@ -1518,7 +1546,8 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
     windowed_pages=dispatch_format=='windowed'
     trimmed_pages=dispatch_format in ('trimmed','windowed')
     packed_pages=dispatch_format in ('packed','trimmed','windowed')
-    if windowed_pages and any(b['bank'] and not 0x4000<=b['pc']<0x8000 for b in blocks):
+    lower_banked_pages=any(b['bank'] and b['pc']<0x4000 for b in blocks)
+    if windowed_pages and any(b['bank'] and (not 0<=b['pc']<0x8000 or b['pc']<0x4000 and (b['bank']%32 or b['bank']>96)) for b in blocks):
         raise ValueError('windowed dispatch requires normalized bank/PC identities')
     leaf_bytes=3 if packed_pages else 4
     directory_bytes=4*(max_bank+1)+1024*(1+len(banks))
@@ -1529,7 +1558,7 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
         size=2+3*(max(entries)-min(entries)+1)
         trimmed_leaf_bytes+=size+(size&1)
     trimmed_page_bytes=directory_bytes+trimmed_leaf_bytes
-    windowed_directory_bytes=4*(max_bank+1)+1024+sum(4*(64 if bank else 256) for bank in banks)
+    windowed_directory_bytes=4*(max_bank+1)+1024+sum(4*((128 if lower_banked_pages else 64) if bank else 256) for bank in banks)
     windowed_page_bytes=windowed_directory_bytes+trimmed_leaf_bytes
     page_bytes=windowed_page_bytes if windowed_pages else trimmed_page_bytes if trimmed_pages else directory_bytes+256*leaf_bytes*(1+len(pages))
     if dispatch_format not in ('auto','paged','packed','trimmed','windowed','tree'):raise ValueError('unknown native dispatch format')
@@ -1540,7 +1569,7 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
               "\tjmp gb_missing_block",".dispatch_bank_in_range:",
               "\tlsl.w #2,d0","\tlea gb_dispatch_banks,a0","\tmovea.l (a0,d0.w),a0",
               "\tmoveq #0,d0","\tmove.w gb_pc,d0","\tlsr.w #8,d0"]
-        if windowed_pages:
+        if windowed_pages and not lower_banked_pages:
             # gb_normalize_bank guarantees nonzero identities only in the
             # upper ROM window. Bank zero still includes MBC5's upper bank0.
             lines += ['\ttst.w gb_bank','\tbeq.s .dispatch_page_bias_ready',
@@ -1586,7 +1615,7 @@ def emit_native_blocks(blocks,out,dispatch_format="auto",max_hot_chains=None,inc
         else:leaf_pointers(['gb_missing_block']*256)
         for bank in sorted(banks):
             lines.append(f'gb_dispatch_bank_{bank:03X}:')
-            bank_pages=range(0x40,0x80) if windowed_pages and bank else range(256)
+            bank_pages=range(0 if lower_banked_pages else 0x40,0x80) if windowed_pages and bank else range(256)
             pointers([f'gb_dispatch_page_{bank:03X}_{page:02X}' if (bank,page) in pages else 'gb_dispatch_empty_page'
                       for page in bank_pages])
         for (bank,page),entries in sorted(pages.items()):

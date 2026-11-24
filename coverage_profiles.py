@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 from gb2md import instruction_length
+from cartridge_banking import mbc1_rom_bank_mask
 
 
 def load_coverage_profiles(rom, paths):
@@ -56,9 +57,11 @@ def load_coverage_profiles(rom, paths):
                 end = pc + len(raw)
                 if pc < 0x8000:
                     limit = 0x4000 if pc < 0x4000 else 0x8000
-                    offset = pc if pc < 0x4000 else bank * 0x4000 + pc - 0x4000
-                    if ((pc < 0x4000 and bank != 0)
-                            or (0x4000 <= pc < 0x8000 and bank == 0 and not 0x19 <= rom[0x147] <= 0x1E)
+                    offset = bank * 0x4000 + (pc & 0x3fff)
+                    mbc1_mask = mbc1_rom_bank_mask(rom)
+                    lower_banks = {0} if mbc1_mask is None else {b & mbc1_mask for b in (0,32,64,96)}
+                    if ((pc < 0x4000 and bank not in lower_banks)
+                            or (0x4000 <= pc < 0x8000 and bank == 0 and not (mbc1_mask is not None and mbc1_mask<31) and not 0x19 <= rom[0x147] <= 0x1E)
                             or end > limit
                             or rom[offset:offset + len(raw)] != raw):
                         raise ValueError(f'{path}: ROM bytes/bank mismatch at {bank:02X}:{pc:04X}')

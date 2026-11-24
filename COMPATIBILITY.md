@@ -1,5 +1,68 @@
 # GB2MD compatibility status
 
+## Standard MBC1 banking — completed 2026-11-24
+
+The reference model and native runtime now agree on retained register state,
+zero translation before ROM-address masking, upper-register behavior in both
+modes, remapped lower-ROM execution and interrupt vectors, and RAM bank/address
+mirroring. Trace identities, coverage imports, DMA and windowed dispatch use
+the same physical mapping. This is a general cartridge fix; no game patches,
+interpreter, fixture edits or downloaded ROMs were introduced.
+
+- **294/294 unit methods PASS with native integrations enabled**, no skips.
+  The public quick run is **245 PASS /49 native skips**.
+- **12/12 standard MBC1 fixtures PASS in Python and native Genesis execution**.
+  Native success requires the actual Fibonacci register signature in the
+  terminal loop. MBC1M multicart remains Python FAIL/native NOT_RUN.
+- **49/49 established external fixtures still PASS on both paths**, giving
+  **61 unique native protocol passes**. The 13 timer regressions remain passing.
+- Same-limit primary Mooneye115: **72PASS /14FAIL /2TIMEOUT /24UNSUPPORTED /
+  3NOT_RUN**, versus63PASS/21FAIL/4TIMEOUT previously. Nine results improve;
+  all other117 results in the126-ROM survey are unchanged. The eleven individual
+  Blargg CPU tests still PASS in Python; their native results remain NOT_RUN.
+- At the original two-million-instruction limit the MBC1 set is11PASS/1FAIL/
+  1TIMEOUT. The remaining standard test, `bits_ramg`, completes at3,071,983
+  instructions; a separate five-million limit verifies its PASS. The deduplicated
+  129-fixture matrix is **86PythonPASS /14FAIL /2TIMEOUT /24UNSUPPORTED /
+  3NOT_RUN** at the old limits, or **87PASS /14FAIL /1TIMEOUT /24UNSUPPORTED /
+  3NOT_RUN** with the longer standard-MBC1 observations; native is61PASS/68NOT_RUN.
+- Fresh Tetris, video-regression and near4MiB-capacity images are **byte-identical**
+  to the prior builds, including block identities. The capacity image still fits
+  4,193,604bytes,700spare. No new gameplay, hardware, rendering or speed result
+  is inferred from the banking tests.
+- The public GUI compiled an original MBC1 diagnostic using the updated backend;
+  build/cancel controls and the mocked output-folder target passed offscreen.
+  Windows was not tested. All15protected checkpoints and5100fixture files were
+  hash-verified unchanged; automated native windows stayed on isolated displays.
+
+Two initial one-million-step native traces missed the tests' late reporting
+routine and trapped. Those failed attempts are retained, not counted as passes.
+Final discovery runs through at least the measured reference completion point;
+independent native observation remains mandatory. This does **not** change
+ordinary `--steps` behavior or prove automatic coverage complete for other ROMs.
+
+Remaining explicit failures are **one MBC1M, nine PPU, three boot/unused-I/O and
+one serial-startup test**. The separate OAM/sprite madness test still times out.
+Incomplete/truncated MBC1 images retain their earlier scope. Specialized fixed-ROM
+pointer recognizers are not generalized to remapped lower banks; unresolved
+large-MBC1 mappings are left unproven rather than guessed as bank zero.
+PPU/startup work is next. [Architecture details](ARCHITECTURE.md) explain the mapping.
+
+Reproduce the external suite with existing, immutable fixtures (the multicart
+case is expected to fail in Python):
+
+```sh
+python3 run_compat_tests.py test_roms/mooneye-test-suite/emulator-only/mbc1 \
+  --max-steps 5000000 --max-frames 2400 \
+  --compile-native --native-steps 5000000 \
+  --run-native-blastem --blastem /path/to/isolated-blastem-wrapper \
+  --native-frames 28800 --native-timeout 600 \
+  --native-output compat-builds/mbc1-retest --json compat-results/mbc1-retest.json
+```
+
+These results supersede earlier MBC1 limitations/counts below; older entries
+remain as dated history.
+
 ## MBC5 ROM-bank resolution — completed 2026-11-24
 
 Six previously failing MBC5 ROM-size tests now PASS in both the Python model

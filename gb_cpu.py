@@ -6,7 +6,7 @@ also the semantic reference for the future generated 68000 runtime.
 """
 from __future__ import annotations
 from collections import Counter
-from cartridge_banking import mbc5_rom_bank_mask
+from cartridge_banking import mbc1_rom_bank_mask, mbc5_rom_bank_mask
 
 Z, N, H, C = 0x80, 0x40, 0x20, 0x10
 
@@ -86,6 +86,8 @@ class Memory:
         # Active-low: bits 0-3 are Right/Left/Up/Down and bits 4-7 are
         # A/B/Select/Start.  Tests and trace discovery can inject input here.
         self.joypad_state = 0xFF
+        self.mbc1_rom_mask = mbc1_rom_bank_mask(rom)
+        self.mbc1_latch_version = 1
         mask = mbc5_rom_bank_mask(rom)
         self.rom_bank_mask = 0xFFFF if mask is None else mask
         self.mapper = rom[0x147]; self.rom_bank = 1; self.ram_bank = 0; self.ram_enabled = False; self.mbc1_mode = 0
@@ -95,27 +97,50 @@ class Memory:
     @property
     def rom_bank(self):
         # Execution identity and CPU/DMA reads use connected address lines.
+        if self.mbc1_rom_mask is not None:
+            # Zero translation precedes disconnected address-line masking.
+            return ((self._rom_bank & 0x60) | ((self._rom_bank & 31) or 1)) & self.mbc1_rom_mask
         return self._rom_bank & self.rom_bank_mask
     @rom_bank.setter
     def rom_bank(self, value):
         self._rom_bank = value
+    @property
+    def rom0_bank(self):
+        if self.mbc1_rom_mask is not None and self.mbc1_mode:
+            return self._rom_bank & 0x60 & self.mbc1_rom_mask
+        return 0
+    def bank_for_address(self, address):
+        return self.rom0_bank if address < 0x4000 else self.rom_bank if address < 0x8000 else 0
+    def _eram_offset(self, address):
+        offset = self.ram_bank * 0x2000 + address - 0xA000
+        if self.mbc1_rom_mask is not None and self.eram:
+            offset &= len(self.eram) - 1
+        return offset
     def __setstate__(self, state):
         # Retain reference snapshots written before ROM selection was split
         # into a register latch and a physical bank.
         state = dict(state)
         state['_rom_bank'] = state.pop('rom_bank', state.get('_rom_bank', 1))
+        state['mbc1_rom_mask'] = mbc1_rom_bank_mask(state['rom'])
+        if state['mbc1_rom_mask'] is not None and not state.get('mbc1_latch_version'):
+            # Old mode-one snapshots kept the upper register in ram_bank.
+            if state.get('mbc1_mode'):
+                state['_rom_bank'] = (state['_rom_bank'] & 31) | (state.get('ram_bank', 0) << 5)
+        state['mbc1_latch_version'] = 1
         mask = mbc5_rom_bank_mask(state['rom'])
         state['rom_bank_mask'] = 0xFFFF if mask is None else mask
         self.__dict__.update(state)
     def read(self, a):
         a &= 0xFFFF
-        if a < 0x4000: return self.rom[a] if a < len(self.rom) else 0xFF
+        if a < 0x4000:
+            offset=self.rom0_bank*0x4000+a
+            return self.rom[offset] if offset < len(self.rom) else 0xFF
         if a < 0x8000:
             offset=self.rom_bank*0x4000+(a-0x4000)
             return self.rom[offset] if offset < len(self.rom) else 0xFF
         if 0x8000 <= a < 0xA000: return self.vram[a-0x8000]
         if 0xA000 <= a < 0xC000:
-            offset=self.ram_bank*0x2000+a-0xA000
+            offset=self._eram_offset(a)
             return self.eram[offset] if self.ram_enabled and offset < len(self.eram) else 0xFF
         if 0xC000 <= a < 0xE000: return self.wram[a-0xC000]
         if 0xE000 <= a < 0xFE00: return self.wram[a-0xE000]
@@ -137,7 +162,7 @@ class Memory:
         if a < 0x8000: self.mapper_write(a,v)
         elif 0x8000 <= a < 0xA000: self.vram[a-0x8000] = v
         elif 0xA000 <= a < 0xC000:
-            offset=self.ram_bank*0x2000+a-0xA000
+            offset=self._eram_offset(a)
             if self.ram_enabled and offset < len(self.eram): self.eram[offset]=v
         elif 0xC000 <= a < 0xE000: self.wram[a-0xC000] = v
         elif 0xE000 <= a < 0xFE00: self.wram[a-0xE000] = v
@@ -180,6 +205,14 @@ class Memory:
     def mapper_write(self,a,v):
         """MBC1/MBC3/MBC5 bank controls; ROM-only writes intentionally do nothing."""
         if self.mapper in (1,2,3):
+            if self.mbc1_rom_mask is not None:
+                if a < 0x2000:self.ram_enabled=(v&15)==10
+                elif a < 0x4000:self._rom_bank=(self._rom_bank&0x60)|(v&31)
+                elif a < 0x6000:self._rom_bank=((v&3)<<5)|(self._rom_bank&31)
+                else:self.mbc1_mode=v&1
+                self.ram_bank=((self._rom_bank>>5)&3) if self.mbc1_mode else 0
+                if self.eram:self.ram_bank &= max(0,len(self.eram)//0x2000-1)
+                return
             if a < 0x2000:self.ram_enabled=(v&15)==10
             elif a < 0x4000:self.rom_bank=(self.rom_bank&0x60)|(v&0x1F) or 1
             elif a < 0x6000:
@@ -207,13 +240,15 @@ class Memory:
     def _dma_read(self, a):
         """Read a DMA source byte without applying CPU-side OAM blocking."""
         a &= 0xFFFF
-        if a < 0x4000:return self.rom[a] if a < len(self.rom) else 0xFF
+        if a < 0x4000:
+            offset=self.rom0_bank*0x4000+a
+            return self.rom[offset] if offset < len(self.rom) else 0xFF
         if a < 0x8000:
             offset=self.rom_bank*0x4000+(a-0x4000)
             return self.rom[offset] if offset < len(self.rom) else 0xFF
         if a < 0xA000:return self.vram[a-0x8000]
         if a < 0xC000:
-            offset=self.ram_bank*0x2000+a-0xA000
+            offset=self._eram_offset(a)
             return self.eram[offset] if self.ram_enabled and offset < len(self.eram) else 0xFF
         # DMA source pages E0-FF mirror the corresponding C0-DF WRAM pages;
         # unlike CPU reads, FE/FF do not select OAM or I/O during the transfer.
@@ -358,7 +393,7 @@ class CPU:
     def step(self):
         """Execute one instruction/interrupt as explicit four-T-cycle buses."""
         self.last_pc=self.pc
-        self.last_bank=self.m.rom_bank if 0x4000<=self.pc<0x8000 else 0
+        self.last_bank=self.m.bank_for_address(self.pc)
         self.last_instruction=None;self._instruction_bytes=[]
         self._step_base()
         if self._instruction_bytes:self.last_instruction=bytes(self._instruction_bytes)

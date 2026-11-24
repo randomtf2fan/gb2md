@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse,json,os,pathlib,re,shutil,subprocess,struct
 from trace_recompiler import compile_trace,parse_input_script,emit_native_blocks
 from color_profiles import COLOR_PROFILES
-from cartridge_banking import mbc5_rom_bank_mask
+from cartridge_banking import mbc1_rom_bank_mask, mbc5_rom_bank_mask
 
 ROOT=pathlib.Path(__file__).parent
 
@@ -68,6 +68,8 @@ def build(source,out,steps=100000,color_profile="green",input_scripts=(),auto_st
     table=["\teven","gb_2bpp_nibble_table:"]
     for row in range(0,256,8): table.append("\tdc.w "+",".join(f"${v:04X}" for v in chunky[row:row+8]))
     (out/"renderer_table.s").write_text("\n".join(table)+"\n")
+    mbc1_mask=mbc1_rom_bank_mask(rom_data)
+    mbc1_ram_bytes=min(0x8000,{0:0,1:0x800,2:0x2000,3:0x8000,4:0x20000,5:0x10000}.get(rom_data[0x149],0))
     mbc5_mask=mbc5_rom_bank_mask(rom_data)
     bounded_mbc5_rom=0x19<=rom_data[0x147]<=0x1E and mbc5_mask is None
     main=f'''gb_mapper_type equ ${rom_data[0x147]:02X}
@@ -183,6 +185,13 @@ gb_cart_rom:
         main=main.replace('\tjmp gb_compiled_entry','\tjsr gb_fps_init\n\tmove.w #$2500,sr\n\tjmp gb_compiled_entry',1)
         main='GB2MD_SHOW_FPS equ 1\n'+main
         main=main.replace('gb_cart_rom:',f'\tinclude "{(ROOT/"fps_overlay_68000.s").as_posix()}"\n\tinclude "{(out/"fps_font.s").absolute().as_posix()}"\n\teven\ngb_cart_rom:')
+    if mbc1_mask is not None:
+        constants=(f"GB2MD_MBC1_MAPPING equ 1\ngb_mbc1_rom_mask equ ${mbc1_mask:04X}\n"
+                   f"gb_mbc1_ram_bank_mask equ {max(0,mbc1_ram_bytes//0x2000-1)}\n"
+                   f"gb_mbc1_ram_address_mask equ ${min(0x1fff,max(0,mbc1_ram_bytes-1)):04X}\n")
+        if mbc1_mask>=32:constants+="GB2MD_MBC1_LOWER_BANKING equ 1\n"
+        if not mbc1_ram_bytes:constants+="GB2MD_MBC1_NO_RAM equ 1\n"
+        main=constants+main
     if bounded_mbc5_rom:
         main="GB2MD_MBC5_BOUNDED_ROM equ 1\n"+main
     if not raster_cache:main="GB2MD_NO_RASTER_CACHE equ 1\n"+main
@@ -275,6 +284,7 @@ gb_cart_rom:
     build_report={
         "source":str(source),"coverage_imports":trace_report["coverage_imports"],"fresh_dynamic_unique_block_count":trace_report["fresh_dynamic_unique_block_count"],"steps_per_scenario":steps,"auto_steps":auto_steps,"auto_inputs":auto_inputs,
         "trace_steps_executed":trace_report["total_steps_executed"],
+        "mbc1_rom_bank_mask":mbc1_mask,
         "mbc5_rom_bank_mask":mbc5_mask,
         "mbc5_bounded_rom":bounded_mbc5_rom,
         "test_serial":test_serial,"raster_row_cache":raster_cache,"optimize_pure_chains":optimize_pure_chains,"optimize_hram":optimize_hram,"show_fps":show_fps,

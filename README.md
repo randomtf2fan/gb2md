@@ -312,6 +312,13 @@ miscompiled. It does not copy the input ROM into output artifacts.
 
 ## Current implementation boundaries
 
+Standard MBC1 cartridges with complete, matching power-of-two ROM headers now
+resolve both ROM windows, disconnected address lines, mode changes, and RAM
+mirrors consistently in Python and native code. Multicart MBC1M wiring remains
+unimplemented, and malformed/truncated MBC1 images retain the earlier scope.
+This does not guarantee complete trace coverage or fix PPU/startup timing.
+See [compatibility results](COMPATIBILITY.md) and [mapping details](ARCHITECTURE.md).
+
 - Native memory helpers, bank-aware dispatch, partial MBC1/MBC3/MBC5 mapping, timer
   scheduling, interrupts, a DMG-to-VDP renderer, controller input, Genesis ROM
   headers/checksums, and bounded automatic input exploration are implemented.

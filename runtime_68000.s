@@ -18,6 +18,8 @@ gb_write_count equ $FF0014
 gb_ei_delay equ $FF001C
 gb_halted equ $FF001D
 gb_rom_bank equ $FF001E
+gb_rom0_bank equ $FF00A2
+gb_mbc1_low equ $FF00A4
 gb_mbc5_rom_latch equ $FF00A0 ; raw nine-bit latch; gb_rom_bank is physical
 gb_cycle_counter equ $FF0020
 gb_div_accum equ $FF0024
@@ -167,6 +169,13 @@ gb_halt_dispatch:
 ; Logical PC determines execution identity; bank zero is also legal in an
 ; MBC5 upper window, so do not infer the window from the old gb_bank value.
 gb_normalize_bank:
+	ifd GB2MD_MBC1_LOWER_BANKING
+	cmpi.w #$4000,gb_pc
+	bhs.s .normal_upper_window
+	move.w gb_rom0_bank,gb_bank
+	rts
+.normal_upper_window:
+	endif
 	cmpi.w #$4000,gb_pc
 	blo.s .fixed_window
 	cmpi.w #$8000,gb_pc
@@ -213,6 +222,13 @@ gb_read8:
 	rts
 .rom0_read:
 	lea gb_cart_rom,a0
+	ifd GB2MD_MBC1_MAPPING
+	moveq #0,d2
+	move.w gb_rom0_bank,d2
+	lsl.l #8,d2
+	lsl.l #6,d2
+	adda.l d2,a0
+	else
 	; In MBC1 RAM-banking mode, the upper register remaps the fixed window.
 	cmpi.b #$01,gb_mapper_kind
 	blo.s .rom0_read_data
@@ -226,6 +242,7 @@ gb_read8:
 	lsl.l #8,d2
 	lsl.l #3,d2
 	adda.l d2,a0
+	endif
 .rom0_read_data:
 	ifd GB2MD_MBC5_BOUNDED_ROM
 	moveq #0,d2
@@ -264,11 +281,17 @@ gb_read8:
 	move.b (a0,d1.w),d0
 	rts
 .eram_read:
+	ifd GB2MD_MBC1_NO_RAM
+	bra.w .eram_read_done
+	endif
 	tst.b gb_ram_enabled
 	beq.s .eram_read_done
 	cmpi.b #4,gb_ram_bank
 	bhs.s .eram_read_done
 	subi.w #$A000,d1
+	ifd GB2MD_MBC1_MAPPING
+	andi.w #gb_mbc1_ram_address_mask,d1
+	endif
 	moveq #0,d2
 	move.b gb_ram_bank,d2
 	lsl.l #8,d2
@@ -426,6 +449,47 @@ gb_write8:
 	bls.w .mapper_mbc3
 	bra.w .done
 .mapper_mbc1:
+	ifd GB2MD_MBC1_MAPPING
+	cmpi.w #$2000,d1
+	blo.w .done
+	cmpi.w #$4000,d1
+	bhs.s .mbc1_new_upper
+	andi.w #31,d0
+	move.b d0,gb_mbc1_low
+	bra.s .mbc1_publish
+.mbc1_new_upper:
+	cmpi.w #$6000,d1
+	bhs.s .mbc1_new_mode
+	andi.w #3,d0
+	move.b d0,gb_mbc1_upper
+	bra.s .mbc1_publish
+.mbc1_new_mode:
+	andi.w #1,d0
+	move.b d0,gb_mbc1_mode
+.mbc1_publish:
+	moveq #0,d0
+	move.b gb_mbc1_low,d0
+	bne.s .mbc1_new_nonzero
+	moveq #1,d0
+.mbc1_new_nonzero:
+	moveq #0,d2
+	move.b gb_mbc1_upper,d2
+	lsl.w #5,d2
+	or.w d2,d0
+	andi.w #gb_mbc1_rom_mask,d0
+	move.w d0,gb_rom_bank
+	clr.w gb_rom0_bank
+	clr.b gb_ram_bank
+	tst.b gb_mbc1_mode
+	beq.s .mbc1_publish_done
+	andi.w #gb_mbc1_rom_mask,d2
+	move.w d2,gb_rom0_bank
+	move.b gb_mbc1_upper,d0
+	andi.b #gb_mbc1_ram_bank_mask,d0
+	move.b d0,gb_ram_bank
+.mbc1_publish_done:
+	rts
+	else
 	cmpi.w #$2000,d1
 	blo.w .done
 	cmpi.w #$4000,d1
@@ -465,6 +529,7 @@ gb_write8:
 .mbc1_mode_rom:
 	clr.b gb_ram_bank
 	rts
+	endif
 .mapper_mbc3:
 	cmpi.w #$2000,d1
 	blo.w .done
@@ -536,11 +601,17 @@ gb_write8:
 .vram_unchanged:
 	rts
 .eram:
+	ifd GB2MD_MBC1_NO_RAM
+	bra.w .eram_done
+	endif
 	tst.b gb_ram_enabled
 	beq.s .eram_done
 	cmpi.b #4,gb_ram_bank
 	bhs.s .eram_done
 	subi.w #$A000,d1
+	ifd GB2MD_MBC1_MAPPING
+	andi.w #gb_mbc1_ram_address_mask,d1
+	endif
 	moveq #0,d2
 	move.b gb_ram_bank,d2
 	lsl.l #8,d2
@@ -1545,7 +1616,11 @@ gb_tick:
 	bsr.w gb_irq_advance            ; final vector-load M-cycle (20T total)
 	clr.b gb_irq_entry
 	clr.b gb_defer_irq
+	ifd GB2MD_MBC1_LOWER_BANKING
+	move.w gb_rom0_bank,gb_bank
+	else
 	clr.w gb_bank
+	endif
 	move.w d3,gb_pc
 .tick_done:
 	tst.b gb_ime
@@ -1753,6 +1828,13 @@ gb_dma_advance:
 	cmpi.w #$0040,d2
 	bhs.s .dma_run_romx
 	lea gb_cart_rom,a0
+	ifd GB2MD_MBC1_MAPPING
+	moveq #0,d2
+	move.w gb_rom0_bank,d2
+	lsl.l #8,d2
+	lsl.l #6,d2
+	adda.l d2,a0
+	else
 	cmpi.b #$01,gb_mapper_kind
 	blo.s .dma_run_rom0_ready
 	cmpi.b #$03,gb_mapper_kind
@@ -1765,6 +1847,7 @@ gb_dma_advance:
 	lsl.l #8,d2
 	lsl.l #3,d2
 	adda.l d2,a0
+	endif
 .dma_run_rom0_ready:
 	ifd GB2MD_MBC5_BOUNDED_ROM
 	moveq #0,d2
@@ -1809,11 +1892,17 @@ gb_dma_advance:
 	adda.w d1,a0
 	bra.s .dma_run_copy
 .dma_run_eram:
+	ifd GB2MD_MBC1_NO_RAM
+	bra.w .dma_run_fill_ff
+	endif
 	tst.b gb_ram_enabled
 	beq.s .dma_run_fill_ff
 	cmpi.b #4,gb_ram_bank
 	bhs.s .dma_run_fill_ff
 	subi.w #$A000,d1
+	ifd GB2MD_MBC1_MAPPING
+	andi.w #gb_mbc1_ram_address_mask,d1
+	endif
 	moveq #0,d2
 	move.b gb_ram_bank,d2
 	lsl.l #8,d2

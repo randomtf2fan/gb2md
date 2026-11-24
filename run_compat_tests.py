@@ -246,7 +246,7 @@ def run_python(path: Path, root: Path, max_steps: int, max_frames: int | None,
     steps = 0
     try:
         for steps in range(1, max_steps + 1):
-            key = (memory.rom_bank, cpu.pc)
+            key = (memory.bank_for_address(cpu.pc), cpu.pc)
             unique_pcs.add(key)
             recent.append({"bank": key[0], "pc": key[1]})
             same_pc = same_pc + 1 if key == prior_key else 0
@@ -298,6 +298,7 @@ def run_python(path: Path, root: Path, max_steps: int, max_frames: int | None,
         "elapsed_seconds": round(time.monotonic() - started, 6),
         "rom_bank": memory.rom_bank,
         "rom_bank_latch": memory._rom_bank,
+        "rom0_bank": memory.rom0_bank,
         "registers": cpu_registers(cpu),
         "ime": cpu.ime,
         "halted": cpu.halted,
@@ -417,7 +418,7 @@ def run_native_blastem(result, source: Path, blastem: Path, frames: int, timeout
     terminal_loop = False
     rom = source.read_bytes()
     if bank is not None and pc is not None:
-        offset = pc if pc < 0x4000 else bank * 0x4000 + pc - 0x4000
+        offset = bank * 0x4000 + (pc & 0x3fff)
         terminal_loop = offset + 1 < len(rom) and rom[offset:offset + 2] == b"\x18\xFE"
     native["blastem"] = {
         "frames": frames, "exit_code": returncode,
