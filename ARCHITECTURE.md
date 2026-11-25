@@ -1580,3 +1580,50 @@ Behavioral references: [Pan Docs LCDC](https://github.com/gbdev/pandocs/blob/mas
 [Mooneye clock/comparison test](https://github.com/Gekkio/mooneye-test-suite/blob/main/acceptance/ppu/stat_lyc_onoff.s).
 These were used as hardware/debugging references; their code and ROM binaries
 are not bundled with the original regression programs.
+
+## DMG VBlank STAT event and LY polling cadence (2026-11-25)
+
+`Memory.tick()` and native `gb_tick` now request STAT when entering line 144
+with STAT's OAM interrupt enable (bit 5) set and the previous shared STAT line
+low. This DMG behavior does not make the readable mode become 2: it remains
+mode 1. It is an entry event, rather than a condition re-evaluated on reads.
+The existing OR-line blocking rule still applies. IF is latched independently
+of IE; clearing IF or reading STAT during VBlank does not repeat the event.
+`gb_idle_flag_wait` therefore falls back after committing its branch when this
+source is enabled. With the timer stopped, `gb_halt_wait` uses the existing
+mode-edge progression instead of jumping directly to VBlank, even if IE masks
+STAT. The running-timer path keeps its ordinary peripheral event processing.
+
+The external `vblank_stat_intr-GS` test exposed a separate native optimization
+error: `gb_idle_ly` snapped directly to a scanline boundary, changing when a
+polling program sampled LY and subsequently read DIV. Ordinary execution and
+accelerated execution could consequently disagree even with the same PPU model.
+The recognizer only accepts the exact `LDH A,(LY); CP constant; JR NZ` loop.
+Each taken iteration costs 32 source T-cycles, with its LY read at offset 12.
+Trace block metadata now records these derived values as `idle_ly_period` and
+`idle_ly_read_offset` for inspection. The native helper skips whole 32T
+iterations up to the first matching read, preserving the loop's sampling phase.
+
+Skipped time passes through ordinary `gb_tick`, in chunks of at most 32,736T
+(a multiple of 32). This retains timer/DMA/display events and does not fabricate
+a new VBlank request when polling from line 145 to 146. If IME or an EI delay
+was active on entry, the helper conservatively stops after its initial tick:
+that tick may have dispatched an interrupt whose handler must execute before
+the polling loop resumes. Existing raster/STAT/timer guards remain in place.
+This is native loop acceleration, not an instruction interpreter or a change
+to SM83 instruction costs.
+
+Original programs in `tests/test_vblank_oam_irq.py` cover event-only behavior,
+OR-line blocking, LCD-off behavior, masked requests, priority, HALT and flag
+polling. `tests/test_ly_poll_cadence.py` compares optimized and ordinary native
+execution with the instruction-stepped Python oracle across six phase/wrap
+cases, including exact elapsed source cycles, stored registers/flags and IF.
+A test-only assembly hook captures the source timestamp; it is absent from
+normal builds. Two additional native probes protect interrupt entry. The
+immutable Mooneye fixture independently verifies its terminal success protocol.
+These targeted checks do not establish cycle-exact PPU behavior generally;
+the startup, mode-3, line-153 and access limitations above remain.
+
+Hardware references: [Mooneye VBlank/STAT test](https://github.com/Gekkio/mooneye-test-suite/blob/main/acceptance/ppu/vblank_stat_intr-GS.s)
+and [Pan Docs interrupt sources](https://github.com/gbdev/pandocs/blob/master/src/Interrupt_Sources.md).
+No third-party implementation or fixture binary is included in these original tests.

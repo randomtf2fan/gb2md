@@ -1,5 +1,78 @@
 # GB2MD compatibility status
 
+## DMG VBlank STAT and native LY polling — verified 2026-11-25
+
+DMG VBlank entry now requests the OAM-enabled STAT source without reporting
+mode 2 or repeating the request on reads. Shared STAT-line blocking and masked
+IF requests are preserved. The new external test also exposed a native
+acceleration error: snapping LY waits to line boundaries changed their sampling
+phase. The recognized polling loop now skips whole 32T iterations, with its
+12T read offset retained, through normal peripheral event processing.
+Interrupt entry is protected. These are general timing fixes, with no title
+checks, game patches, fixture edits or replacement instruction interpreter.
+
+- **313/313 unit methods PASS with native integrations enabled**, no skips.
+  Public quick run: **259 PASS / 54 native integration skips**.
+- **63/63 distinct fixtures PASS in fresh Python and native terminal protocols**:
+  all previous 62 plus Mooneye `vblank_stat_intr-GS`. All 13 timer regressions
+  remain passing. The eleven individual Blargg CPU tests pass in Python, but
+  their native results remain NOT_RUN; three separate Blargg memory-timing
+  diagnostics have verified native passes.
+- Fresh primary Mooneye 115: **74 PASS / 12 FAIL / 2 TIMEOUT /
+  24 UNSUPPORTED / 3 NOT_RUN**. Exactly one previous failure improves, with
+  no status regressions across the complete 126-ROM reference survey.
+- Deduplicated 129-fixture matrix: **88 Python PASS / 12 FAIL / 2 TIMEOUT /
+  24 UNSUPPORTED / 3 NOT_RUN** at the original limits. Longer observations give
+  **89 PASS / 12 FAIL / 1 TIMEOUT / 24 UNSUPPORTED / 3 NOT_RUN**. Native:
+  **63 PASS / 66 NOT_RUN**. Standard MBC1 `bits_ramg` still needs more than its
+  original 2M-instruction limit and passes at 5M; the separate OAM/sprite madness
+  timeout remains.
+- Twelve native differential cases compare accelerated and ordinary polling
+  with the Python instruction oracle across six phase/wrap combinations,
+  including exact source timestamps, stored register/flag values and IF.
+  Two further probes verify that initial interrupt entry is not skipped.
+- Native Tetris reaches score 35, GAME OVER and the menu; the extended
+  16,082-Genesis-frame replay re-enters gameplay and soft-drops to score 13.
+  NEXT is visible, actual SDL input is used, and no traps or guest-memory writes
+  occur. LINES stays 0: no fresh line-clear or hardware claim.
+- The video replay completes 72,002 Genesis frames with 20 distinct captured
+  viewports and no traps. It advances **25.81054 source seconds versus 25.82985
+  previously** (about 0.075% less): essentially unchanged throughput, not a speed
+  gain, full-clip verification or audio/hardware result.
+- All previous Tetris/video/capacity block identities are retained. The capacity
+  graph fits **4,193,880 bytes (424 spare)** with the existing 550 hot stubs.
+  Private and public GUI build/cancel/output-folder checks pass offscreen with
+  the external assembler configured. Windows was not tested. All 15 original
+  checkpoints and 5,100 fixture files remain intact.
+
+Remaining explicit failures: **7 PPU, 3 boot/unused-I/O, 1 serial-startup and
+1 MBC1M**. Precise startup offsets, variable mode-3 timing, line-153 behavior,
+PPU access restrictions, blanking, performance and wider gameplay remain
+incomplete. The initial native Mooneye failure was retained as negative evidence
+before correcting LY-loop timing; a Python pass alone was not counted as a
+native pass. See [the timing design](ARCHITECTURE.md#dmg-vblank-stat-event-and-ly-polling-cadence-2026-11-25).
+
+Reproduce focused original tests:
+
+```sh
+python3 -m unittest discover -s tests -p 'test_vblank_oam_irq.py' -v
+python3 -m unittest discover -s tests -p 'test_ly_poll_cadence.py' -v
+```
+
+Native methods require the documented `GB2MD_NATIVE_TESTS=1`, external assembler
+and `GB2MD_BLASTEM` setup. For an existing immutable external fixture:
+
+```sh
+python3 run_compat_tests.py test_roms/mooneye-test-suite/acceptance/ppu/vblank_stat_intr-GS.gb \
+  --max-steps 2000000 --compile-native --native-steps 1000000 \
+  --run-native-blastem --blastem /path/to/isolated-blastem-wrapper \
+  --native-frames 3600 --native-timeout 90 \
+  --native-output compat-builds/vblank-retest --json compat-results/vblank-retest.json
+```
+
+Older dated entries below retain their historical results; this section
+supersedes their current totals. No full-game or hardware compatibility is implied.
+
 ## LCD stop/restart and interrupt ordering — verified 2026-11-25
 
 The display clock now stops independently of CPU/timer/DMA time, LY resets on

@@ -1275,6 +1275,8 @@ def compile_trace(rom_path, out, steps, input_scenarios=None, auto_steps=False,
                 and loop[1]["family"]=="CP_A_D8" and loop[1]["operand"]<154 and block["opcode"]==0x20):
                 block["idle_wait"]=True
                 block["idle_ly_target"]=loop[1]["operand"]
+                block["idle_ly_period"]=sum(instruction_cycles(item['opcode'],item['operand']) for item in loop)+instruction_cycles(block['opcode'],block['operand'],True)
+                block["idle_ly_read_offset"]=instruction_cycles(loop[0]['opcode'],loop[0]['operand'])
             elif read_addresses and all(0xC000<=a<0xFE00 or 0xFF80<=a<0xFFFF for a in read_addresses):
                 block["idle_wait"]=True
     for block in blocks:block["native_lowered"]=native_body(block) is not None

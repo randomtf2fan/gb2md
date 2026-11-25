@@ -312,11 +312,18 @@ miscompiled. It does not copy the input ROM into output artifacts.
 
 ## Current implementation boundaries
 
-LCD stop/restart now uses an independent display clock, retained STAT comparison
-state, and native PPU read/write synchronization. Mooneye `stat_lyc_onoff` passes
-on both backends. This improves correctness, with a measured synchronization cost:
-the fixed video benchmark advances about 11% less source time. Exact PPU timing and
-game speed remain incomplete; see [current results](COMPATIBILITY.md).
+DMG VBlank entry now includes the OAM-enabled STAT request. Native acceleration
+of the recognized LY equality loop preserves its 32T iteration and 12T read
+phase instead of snapping to a scanline boundary; differential checks verify
+source-cycle agreement with ordinary execution. This improves timing correctness,
+not complete PPU compatibility. See [the implementation details](ARCHITECTURE.md#dmg-vblank-stat-event-and-ly-polling-cadence-2026-11-25).
+
+The earlier LCD stop/restart correction added an independent display clock,
+retained STAT comparison state, and native PPU read/write synchronization.
+Mooneye `stat_lyc_onoff` passes on both backends. That change reduced source-clock
+advancement in the fixed video benchmark by about 11%; the subsequent VBlank/LY
+correction leaves throughput essentially unchanged from that baseline. Exact
+PPU timing and game speed remain incomplete; see [current results](COMPATIBILITY.md).
 
 Standard MBC1 cartridges with complete, matching power-of-two ROM headers now
 resolve both ROM windows, disconnected address lines, mode changes, and RAM

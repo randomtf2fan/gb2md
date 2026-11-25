@@ -327,8 +327,13 @@ class Memory:
             boundary=80 if dot<80 else 252 if dot<252 else 456
             cursor=min(end,cursor+boundary-dot)
             if cursor%456==0:self.ppu_starting=False
+            entering_vblank=cursor%70224==456*144
+            # DMG VBlank entry also requests the OAM STAT source, while the
+            # visible mode is 1. It shares the existing OR-line blocking rule.
+            if entering_vblank and self.io[0x41]&0x20 and not self.stat_line:
+                self.io[0x0F]|=2
             self._update_stat(cursor)
-            if cursor%70224==456*144:self.io[0x0F]|=1
+            if entering_vblank:self.io[0x0F]|=1
         self.ppu_cycles=end%70224
 
 class CPU:

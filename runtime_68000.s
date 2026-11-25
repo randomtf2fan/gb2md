@@ -964,6 +964,10 @@ gb_idle_wait:
 ; New traces call this only for known WRAM/HRAM flag polling loops.
 gb_idle_flag_wait:
 	jsr gb_tick                       ; flush the branch and its basic block
+	; A masked OAM source must still latch IF at VBlank. Retain the ordinary
+	; execution path rather than skipping the event when STAT IE is disabled.
+	btst #5,gb_io+$41
+	bne.w .idle_fallback
 	tst.b gb_raster_armed
 	bne.w .idle_fallback
 	btst #1,gb_ie
@@ -1027,7 +1031,11 @@ gb_halt_wait:
 	btst #7,gb_io+$40
 	beq.w .halt_wait_done
 	btst #2,gb_io+$07
-	beq.w .halt_direct_vblank
+	bne.s .halt_timer_active
+	btst #5,gb_io+$41
+	bne.w .halt_stat_wait
+	bra.w .halt_direct_vblank
+.halt_timer_active:
 	; A running timer still needs every divider edge and overflow/reload event.
 	; Advance through the normal event-driven tick path. If its IRQ is enabled,
 	; stop at the reload that raises IF; otherwise VBlank is the next modelled
@@ -1159,13 +1167,19 @@ gb_halt_wait:
 ; exist between the current and requested scanline.
 gb_idle_ly:
 	move.w d0,-(sp)
-	jsr gb_tick                       ; flush the branch and its basic block
+	moveq #0,d0
+	move.b gb_ime,d0
+	or.b gb_ei_delay,d0
+	move.w d0,-(sp)
+	jsr gb_tick                       ; charge the completed taken branch
+	move.w (sp)+,d1
 	move.w (sp)+,d0
+	tst.b d1                         ; entry could have serviced an IRQ
+	bne.w .idle_ly_fallback
 	cmp.b gb_io+$44,d0
-	beq.w .idle_ly_done_early
+	beq.w .idle_ly_fallback
 	tst.b gb_raster_armed
 	bne.w .idle_ly_fallback
-	; STAT-enabled polling cannot skip mode/coincidence transitions.
 	move.b gb_io+$41,d1
 	andi.b #$78,d1
 	bne.w .idle_ly_fallback
@@ -1191,24 +1205,34 @@ gb_idle_ly:
 	moveq #0,d1
 	move.w gb_ly_accum,d1
 	sub.l d1,d2
-	bsr.w gb_add_idle_cycles
-	clr.w gb_ly_accum
-	clr.b gb_ppu_starting
-	move.b d0,gb_io+$44
-	cmpi.b #144,d0
-	blo.s .idle_ly_done
-	bset #0,gb_io+$0F
-	tst.b gb_video_dirty
-	beq.s .idle_ly_done
-	bsr.w gb_render_frame
-	clr.b gb_video_dirty
-.idle_ly_done:
+	; Only LDH A,(LY) / CP n / JR NZ is recognized: 32T per taken loop,
+	; sampled 12T after its entry. Skip full iterations before the first
+	; matching read, preserving the polling cadence and subsequent DIV reads.
+	subi.l #12,d2
+	ble.s .idle_ly_fallback
+	addi.l #31,d2
+	andi.l #$FFFFFFE0,d2
+	; Use ordinary peripheral events, including pending reload/DMA and a
+	; crossed VBlank. Each chunk is a whole number of 32T loop iterations.
+	clr.w gb_batch_bias
+	clr.w d7
+.idle_ly_chunk:
+	move.w #32736,d7
+	cmpi.l #32736,d2
+	bhi.s .idle_ly_more
+	move.w d2,d7
+	moveq #0,d2
+	bra.s .idle_ly_advance
+.idle_ly_more:
+	subi.l #32736,d2
+.idle_ly_advance:
+	move.l d2,-(sp)
 	clr.b gb_step_cycles
-	jsr gb_tick
-	rts
+	bsr.w gb_tick
+	move.l (sp)+,d2
+	tst.l d2
+	bne.s .idle_ly_chunk
 .idle_ly_fallback:
-	rts
-.idle_ly_done_early:
 	rts
 
 ; Add d2.l idle T-cycles to the cycle counter and DIV state. TIMA-enabled
@@ -1510,7 +1534,7 @@ gb_tick:
 	bsr.w gb_raster_scanline
 .stat_after_mode3:
 	cmpi.w #456,d0
-	blo.s .scanlines_done
+	blo.w .scanlines_done
 	subi.w #456,d0
 	addq.b #1,gb_io+$44
 	cmpi.b #154,gb_io+$44
@@ -1519,6 +1543,16 @@ gb_tick:
 .ly_in_range:
 	clr.b gb_ppu_starting
 	clr.w gb_ly_accum
+	; DMG OAM-enable also requests STAT at VBlank entry, without changing
+	; visible mode1 or turning reads into repeatable interrupt requests.
+	cmpi.b #144,gb_io+$44
+	bne.s .line_stat_sync
+	btst #5,gb_io+$41
+	beq.s .line_stat_sync
+	tst.b gb_stat_line
+	bne.s .line_stat_sync
+	bset #1,gb_io+$0F
+.line_stat_sync:
 	bsr.w gb_stat_sync
 	cmpi.b #144,gb_io+$44
 	bne.s .no_scanline
