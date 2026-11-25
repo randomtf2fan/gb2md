@@ -353,6 +353,12 @@ class CPU:
     def set_de(self,v): self.d=(v>>8)&255; self.e=v&255
     def idle_cycle(self): self.m.tick(4)
     def read_cycle(self,a):
+        if a == 0xFF41:
+            # STAT is sampled before this read M-cycle elapses. In particular,
+            # a mode edge during the cycle must not change the returned byte.
+            value=self.m.read(a)
+            self.m.tick(4)
+            return value
         self.m.tick(4)
         return self.m.read(a)
     def write_cycle(self,a,v):

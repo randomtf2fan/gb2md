@@ -1,5 +1,61 @@
 # GB2MD compatibility status
 
+## STAT read sampling — verified 2026-11-25
+
+The plain Mooneye mode 2-to-0 and mode 2-to-3 timing failures came from sampling
+STAT after its read M-cycle instead of before that cycle completed. Both
+backends now retain the sampled byte while advancing the full cycle and its
+peripheral events. Native read-modify-write and low/high stack-byte reads also
+reserve the STAT read cycle; interrupt arbitration remains at the instruction
+boundary. The existing mode durations, timer/DMA code and source instruction
+costs are unchanged. No game-specific rules or ROM edits were introduced.
+
+- **316/316 unit methods PASS with native integrations enabled**, no skips.
+  Quick suite: **261 PASS / 55 native integration skips**, also verified in the
+  public source tree. New original programs cover 20 native boundary cases;
+  the preserved old reference fails their regression checks.
+- Fresh 126-ROM Python survey: **87 PASS / 10 FAIL / 2 TIMEOUT /
+  24 UNSUPPORTED / 3 NOT_RUN**. Primary Mooneye 115: **76 PASS / 10 FAIL /
+  2 TIMEOUT / 24 UNSUPPORTED / 3 NOT_RUN**. Exactly two failures become PASS;
+  all other 124 statuses are unchanged. Eleven individual Blargg CPU tests
+  still pass in Python; native CPU results remain NOT_RUN.
+- **17 selected external fixtures freshly PASS on Python and native execution**:
+  the two newly fixed transitions, both previously verified STAT regressions,
+  and all 13 timer tests. Native success requires the actual terminal protocol.
+  The previous broader 63-fixture native validation is historical: it was not
+  repeated in full during this bounded session. Other current-native results
+  remain NOT_RUN, rather than inferred passes or regressions.
+- Native Tetris completes a 16,082-Genesis-frame replay through game over,
+  menu, restart and live soft-drop scoring (13), with NEXT visible and no traps.
+  An earlier BlastEm exit has no established cause; the unchanged image passed
+  retry. Small stray border pixels remain uninvestigated. LINES stays 0, so no
+  fresh line-clear or rendering-fidelity/hardware claim is made.
+- Tetris/video/capacity images retain every previous block identity. The
+  capacity graph is **4,194,092 bytes (212 spare)** with 550 hot stubs. Public
+  GUI build/cancel/output-folder checks pass offscreen with an external
+  assembler. All 15 original checkpoints and 5,100 fixture files are preserved.
+
+Remaining explicit Python failures: **5 PPU, 3 boot/unused-I/O, 1 serial-startup,
+1 MBC1M**. Sprite/window/scroll transfer stalls, startup offsets, line 153,
+access restrictions and blanking remain incomplete. Other I/O sampling phases
+were not changed. Bad Apple playback, speed, physical hardware and wider game
+routes were not freshly tested; no performance improvement is claimed.
+
+Reproduce the original regression tests:
+
+```sh
+python3 -m unittest discover -s tests -p test_stat_read_phase.py -v
+```
+
+For the external fixtures, use the existing immutable binaries and the native
+harness invocation below, selecting `intr_2_mode0_timing.gb` or
+`intr_2_mode3_timing.gb` instead. Use a new output directory. Native unit methods
+require the documented external assembler and isolated BlastEm opt-in setup.
+See [sampling and runtime details](ARCHITECTURE.md#stat-read-m-cycle-sampling-2026-11-25).
+
+This section supersedes earlier current totals; older entries retain their own
+historical validation scope. The remaining two fixed-budget timeouts are unchanged.
+
 ## DMG VBlank STAT and native LY polling — verified 2026-11-25
 
 DMG VBlank entry now requests the OAM-enabled STAT source without reporting

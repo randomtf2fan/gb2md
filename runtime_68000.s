@@ -333,7 +333,7 @@ gb_read8:
 	rts
 .io_read:
 	cmpi.w #$FF41,d1
-	beq.s .ppu_read_clock
+	beq.w gb_stat_read8
 	cmpi.w #$FF44,d1
 	bne.s .not_stat_status_read
 .ppu_read_clock:
@@ -392,6 +392,46 @@ gb_read8:
 	subi.w #$FF80,d1
 	lea gb_hram,a0
 	move.b (a0,d1.w),d0
+	rts
+
+; Sample STAT at the start of the read M-cycle, then finish that cycle.
+; Keep total source cost and IRQ arbitration at the instruction boundary.
+gb_stat_read8:
+	movem.l d1-d6/a0-a1,-(sp)
+	moveq #0,d0
+	move.b gb_defer_irq,d0
+	move.w d0,-(sp)
+	moveq #0,d0
+	cmpi.b #4,gb_step_cycles
+	blo.s .stat_read_prefix
+	subq.b #4,gb_step_cycles
+	moveq #4,d0
+.stat_read_prefix:
+	move.w d0,-(sp)
+	move.b #1,gb_defer_irq
+	bsr.w gb_tick
+	bsr.w gb_stat_sync
+	moveq #0,d0
+	move.b gb_io+$41,d0
+	ori.b #$80,d0
+	move.w d0,-(sp)
+	move.w 2(sp),d0
+	beq.s .stat_read_complete
+	move.b d0,gb_step_cycles
+	; This extra internal tick must not consume another EI instruction delay.
+	move.b gb_ei_delay,-(sp)
+	move.b gb_ime,-(sp)
+	bsr.w gb_tick
+	move.b (sp)+,gb_ime
+	move.b (sp)+,gb_ei_delay
+.stat_read_complete:
+	move.w (sp)+,d0
+	addq.l #2,sp
+	move.w (sp)+,d1
+	move.b d1,gb_defer_irq
+	clr.b gb_step_cycles
+	move.b #1,gb_force_tick
+	movem.l (sp)+,d1-d6/a0-a1
 	rts
 
 ; d1.w = logical GB address, d0.b = value.
@@ -1341,11 +1381,19 @@ gb_rmw_read8:
 	moveq #0,d0
 	move.b gb_step_cycles,d0
 	subq.w #4,d0
+	cmpi.w #$FF41,d1
+	bne.s .rmw_prefix_ready
+	subq.w #4,d0                 ; STAT helper owns the read M-cycle
+.rmw_prefix_ready:
 	move.b #1,gb_defer_irq
 	move.b d0,gb_step_cycles
 	bsr.w gb_tick
 	clr.b gb_step_cycles
 	move.l 2(sp),d1
+	cmpi.w #$FF41,d1
+	bne.s .rmw_sample
+	move.b #4,gb_step_cycles
+.rmw_sample:
 	bsr.w gb_read8
 	move.w (sp)+,d1
 	move.b d1,gb_defer_irq
@@ -1436,18 +1484,29 @@ gb_pop16_timed:
 	move.b gb_defer_irq,d2
 	move.w d2,-(sp)
 	move.b #1,gb_defer_irq
+	cmpi.w #$FF41,gb_sp
+	bne.s .pop_low_prefix
+	subq.w #4,d0
+.pop_low_prefix:
 	move.b d0,gb_step_cycles
 	bsr.w gb_tick
 	clr.b gb_step_cycles
 	move.w gb_sp,d1
+	cmpi.w #$FF41,d1
+	bne.s .pop_low_sample
+	move.b #4,gb_step_cycles
+.pop_low_sample:
 	bsr.w gb_read8
 	moveq #0,d3
 	move.b d0,d3
 	move.l d3,-(sp)
 	move.b #1,gb_defer_irq
 	move.b #4,gb_step_cycles
+	cmpi.w #$FF40,gb_sp
+	beq.s .pop_high_stat
 	bsr.w gb_tick
 	clr.b gb_step_cycles
+.pop_high_stat:
 	move.w gb_sp,d1
 	addq.w #1,d1
 	bsr.w gb_read8

@@ -312,6 +312,12 @@ miscompiled. It does not copy the input ROM into output artifacts.
 
 ## Current implementation boundaries
 
+STAT reads now retain the byte sampled before their read M-cycle completes.
+This fixes the plain Mooneye mode 2-to-3 and mode 2-to-0 transition tests on
+Python and native execution, without shifting PPU mode boundaries or instruction
+costs. Sprite stalls, variable mode-3 timing and broader I/O sampling remain
+incomplete; see [the read-phase design](ARCHITECTURE.md#stat-read-m-cycle-sampling-2026-11-25).
+
 DMG VBlank entry now includes the OAM-enabled STAT request. Native acceleration
 of the recognized LY equality loop preserves its 32T iteration and 12T read
 phase instead of snapping to a scanline boundary; differential checks verify

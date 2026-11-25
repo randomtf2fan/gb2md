@@ -1627,3 +1627,42 @@ the startup, mode-3, line-153 and access limitations above remain.
 Hardware references: [Mooneye VBlank/STAT test](https://github.com/Gekkio/mooneye-test-suite/blob/main/acceptance/ppu/vblank_stat_intr-GS.s)
 and [Pan Docs interrupt sources](https://github.com/gbdev/pandocs/blob/master/src/Interrupt_Sources.md).
 No third-party implementation or fixture binary is included in these original tests.
+
+## STAT read M-cycle sampling (2026-11-25)
+
+`CPU.read_cycle()` now latches STAT ($FF41) before advancing that read's four
+T-cycles. Previously it returned the mode after the cycle, so a transfer or
+HBlank edge crossed during the read changed the byte returned to the program.
+The PPU's existing 80/252/456-dot boundaries were not the cause of the two plain
+mode-transition failures; changing those constants would hide the sampling bug.
+Direct `Memory.read()` remains an immediate peek at the current state.
+
+Native `gb_stat_read8` commits preceding source time, samples the register, then
+finishes the read M-cycle. It preserves the returned byte across ticking and
+restores nested IRQ deferral. Arbitration stays at the instruction boundary;
+the extra internal tick preserves the EI-delay/IME state rather than consuming
+an additional instruction delay. `gb_rmw_read8` and `gb_pop16_timed` reserve that
+read cycle when their operand or either stack byte is STAT. Other memory paths
+keep their existing behavior. Instruction costs, timer/DMA algorithms and the
+recognized LY poll's 32T/12T contract are unchanged. This does not establish
+correct sampling phases for every other I/O register or instruction bus access.
+
+Original `tests/test_stat_read_phase.py` programs exercise 20 cases: both sides
+of mode 2-to-3 and mode 3-to-0 boundaries with ordinary indirect, LDH and absolute
+loads; plus BIT, read-modify-write rotation, and low/high POP bytes. Expectations
+include explicit modes and flags, not merely agreement between two backends.
+The reference tests also check that a sampled old mode can be returned while
+the cycle completes and latches the subsequent HBlank interrupt. The preserved
+pre-fix reference fails these diagnostics. The immutable Mooneye
+`intr_2_mode0_timing` and `intr_2_mode3_timing` fixtures now independently reach
+their success protocols on Python and native execution.
+
+Variable mode-3 lengths, sprite/window/scroll penalties, PPU access restrictions,
+startup and line-153 quirks remain separate work. No speed increase is claimed:
+STAT reads require another internal scheduler service to preserve their sample.
+The CPU clock rate and total source instruction cycles were not multiplied.
+
+Hardware/debugging references: Mooneye's [mode-0 test](https://github.com/Gekkio/mooneye-test-suite/blob/main/acceptance/ppu/intr_2_mode0_timing.s),
+[mode-3 test](https://github.com/Gekkio/mooneye-test-suite/blob/main/acceptance/ppu/intr_2_mode3_timing.s),
+and [documented pre-read cycle count](https://github.com/Gekkio/mooneye-test-suite/blob/main/acceptance/ppu/hblank_ly_scx_timing-GS.s).
+Their implementation and ROM contents are not copied into the original tests.
