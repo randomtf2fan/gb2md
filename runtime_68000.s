@@ -20,6 +20,7 @@ gb_halted equ $FF001D
 gb_rom_bank equ $FF001E
 gb_rom0_bank equ $FF00A2
 gb_mbc1_low equ $FF00A4
+gb_ppu_starting equ $FF00A5
 gb_mbc5_rom_latch equ $FF00A0 ; raw nine-bit latch; gb_rom_bank is physical
 gb_cycle_counter equ $FF0020
 gb_div_accum equ $FF0024
@@ -331,6 +332,23 @@ gb_read8:
 	move.b (a0,d1.w),d0
 	rts
 .io_read:
+	cmpi.w #$FF41,d1
+	beq.s .ppu_read_clock
+	cmpi.w #$FF44,d1
+	bne.s .not_stat_status_read
+.ppu_read_clock:
+	; Sample STAT/LY at this bus access, not a stale scheduler batch.
+	movem.l d1-d6/a0-a1,-(sp)
+	moveq #0,d0
+	move.b gb_defer_irq,d0
+	move.w d0,-(sp)
+	move.b #1,gb_defer_irq
+	bsr.w gb_tick
+	move.w (sp)+,d0
+	move.b d0,gb_defer_irq
+	move.b #1,gb_force_tick
+	clr.b gb_step_cycles
+	movem.l (sp)+,d1-d6/a0-a1
 	cmpi.w #$FF41,d1
 	bne.s .not_stat_status_read
 	bsr.w gb_stat_sync
@@ -659,6 +677,12 @@ gb_write8:
 	rts
 .io:
 	subi.w #$FF00,d1
+	cmpi.w #$0040,d1
+	beq.s .io_flush_irq_timing
+	cmpi.w #$0041,d1
+	beq.s .io_flush_irq_timing
+	cmpi.w #$0045,d1
+	beq.s .io_flush_irq_timing
 	cmpi.w #$000F,d1
 	beq.s .io_flush_irq_timing
 	cmpi.w #$0046,d1
@@ -739,11 +763,6 @@ gb_write8:
 .tac_no_timer_glitch:
 	movem.l (sp)+,d0-d4/a1
 .not_tac_write:
-	cmpi.w #$0044,d1
-	bne.s .not_ly_write
-	clr.b d0
-	clr.w gb_ly_accum
-.not_ly_write:
 	cmpi.w #$0005,d1
 	bne.s .not_tima_write
 	tst.b gb_timer_reloaded
@@ -800,6 +819,20 @@ gb_write8:
 	cmpi.w #$0045,d1
 	bne.s .stat_write_done
 .sync_stat_write:
+	cmpi.w #$0040,d1
+	bne.s .stat_only_sync
+	move.w d0,-(sp)
+	eor.b d2,d0
+	btst #7,d0
+	beq.s .lcdc_phase_unchanged
+	clr.w gb_ly_accum
+	clr.b gb_io+$44
+	move.w (sp),d0
+	move.b d0,gb_ppu_starting
+	andi.b #$80,gb_ppu_starting
+.lcdc_phase_unchanged:
+	move.w (sp)+,d0
+.stat_only_sync:
 	bsr.w gb_stat_sync
 .stat_write_done:
 	cmpi.w #$000F,d1
@@ -865,7 +898,7 @@ gb_write8:
 	move.b d0,(a0,d1.w)
 	rts
 
-; IF/IE writes must arbitrate at the following instruction, not at a later
+; IF/IE and PPU-control writes arbitrate at the following instruction, not a later
 ; scheduler batch. Commit prior cycles before the write, defer service until
 ; the opcode completes, and preserve temporaries used by word/stack stores.
 gb_irq_write_barrier:
@@ -962,6 +995,7 @@ gb_idle_flag_wait:
 	move.l d1,d2
 	bsr.w gb_add_idle_cycles
 	clr.w gb_ly_accum
+	clr.b gb_ppu_starting
 	move.b #144,gb_io+$44
 	bset #0,gb_io+$0F
 	tst.b gb_video_dirty
@@ -1085,6 +1119,7 @@ gb_halt_wait:
 	move.l d1,d2
 	bsr.w gb_add_idle_cycles
 	clr.w gb_ly_accum
+	clr.b gb_ppu_starting
 	move.b #144,gb_io+$44
 	bset #0,gb_io+$0F
 	tst.b gb_video_dirty
@@ -1158,6 +1193,7 @@ gb_idle_ly:
 	sub.l d1,d2
 	bsr.w gb_add_idle_cycles
 	clr.w gb_ly_accum
+	clr.b gb_ppu_starting
 	move.b d0,gb_io+$44
 	cmpi.b #144,d0
 	blo.s .idle_ly_done
@@ -1196,15 +1232,24 @@ gb_stat_sync:
 	; Only two temporaries are needed. D2/D3 may hold a pending bus-write
 	; value/address in callers and remain untouched, as with the old save set.
 	movem.l d0-d1,-(sp)
-	moveq #0,d0
 	btst #7,gb_io+$40
-	beq.s .stat_mode_ready
+	bne.s .stat_clock_enabled
+	andi.b #$7C,gb_io+$41         ; stopped comparator and OR-edge latch retained
+	movem.l (sp)+,d0-d1
+	rts
+.stat_clock_enabled:
+	moveq #0,d0
 	moveq #1,d0
 	cmpi.b #144,gb_io+$44
 	bhs.s .stat_mode_ready
 	moveq #2,d0
 	cmpi.w #80,gb_ly_accum
-	blo.s .stat_mode_ready
+	bhs.s .stat_transfer_mode
+	tst.b gb_ppu_starting
+	beq.s .stat_mode_ready
+	moveq #0,d0                  ; first line omits OAM scan after LCD enable
+	bra.s .stat_mode_ready
+.stat_transfer_mode:
 	moveq #3,d0
 	cmpi.w #252,gb_ly_accum
 	blo.s .stat_mode_ready
@@ -1439,6 +1484,8 @@ gb_tick:
 	move.w d0,gb_div_accum
 	lsr.w #8,d1
 	add.b d1,gb_io+$04
+	btst #7,gb_io+$40
+	beq.w .ppu_clock_stopped
 	; Large event-batched waits can span many scanlines. Consume each crossed
 	; boundary so LY wrapping, VBlank, and dirty-frame rendering still happen
 	; at the same emulated boundary rather than once per host-side tick call.
@@ -1470,6 +1517,7 @@ gb_tick:
 	blo.s .ly_in_range
 	clr.b gb_io+$44
 .ly_in_range:
+	clr.b gb_ppu_starting
 	clr.w gb_ly_accum
 	bsr.w gb_stat_sync
 	cmpi.b #144,gb_io+$44
@@ -1487,6 +1535,7 @@ gb_tick:
 	bra.w .scanline_loop
 .scanlines_done:
 	move.w d0,gb_ly_accum
+.ppu_clock_stopped:
 	; Event-driven timer: advance directly to the next four-cycle reload or
 	; selected-divider falling edge. This is cycle-exact without iterating over
 	; every T-cycle in timer-enabled games.

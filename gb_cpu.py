@@ -93,6 +93,8 @@ class Memory:
         self.mapper = rom[0x147]; self.rom_bank = 1; self.ram_bank = 0; self.ram_enabled = False; self.mbc1_mode = 0
         ram_sizes={0:0,1:0x800,2:0x2000,3:0x8000,4:0x20000,5:0x10000}; self.eram=bytearray(ram_sizes.get(rom[0x149],0))
         self.cycles = 0
+        self.ppu_cycles = 0
+        self.ppu_starting = False
         self.stat_line = False
     @property
     def rom_bank(self):
@@ -129,6 +131,8 @@ class Memory:
         state['mbc1_latch_version'] = 1
         mask = mbc5_rom_bank_mask(state['rom'])
         state['rom_bank_mask'] = 0xFFFF if mask is None else mask
+        state.setdefault('ppu_cycles',state.get('cycles',0)%70224 if state['io'][0x40]&0x80 else 0)
+        state.setdefault('ppu_starting',False)
         self.__dict__.update(state)
     def read(self, a):
         a &= 0xFFFF
@@ -194,10 +198,15 @@ class Memory:
                     if self.timer_reload_delay==4:
                         self.timer_reload_delay=0;self.io[0x05]=self.io[0x06];self.io[0x0F]|=4;self.timer_reloaded_this_cycle=True
             elif a == 0xFF0F:self.io[0x0F]=v&0x1F
+            elif a == 0xFF40:
+                if (self.io[0x40]^v)&0x80:
+                    self.ppu_cycles=0;self.io[0x44]=0
+                    self.ppu_starting=bool(v&0x80)
+                self.io[0x40]=v
             elif a == 0xFF41:self.io[0x41]=(v&0x78)|(self.io[0x41]&7)
             elif a == 0xFF44:pass
             else:self.io[a-0xFF00] = v
-            if a in (0xFF40,0xFF41,0xFF45):self._update_stat(self.cycles)
+            if a in (0xFF40,0xFF41,0xFF45):self._update_stat(self.ppu_cycles)
             if a == 0xFF46:
                 self.dma_requested = v
         elif 0xFF80 <= a < 0xFFFF: self.hram[a-0xFF80] = v
@@ -276,10 +285,14 @@ class Memory:
             self._dma_machine_cycle()
     def _update_stat(self, cycles):
         """Baseline fixed-length PPU modes; mode 3 stall timing is still open."""
+        if not self.io[0x40]&0x80:
+            # The stopped comparison clock retains bit2 and its edge latch.
+            self.io[0x41]&=0x7C
+            return
         ly=(cycles//456)%154;dot=cycles%456
-        mode=1 if ly>=144 else (2 if dot<80 else 3 if dot<252 else 0)
-        enabled=bool(self.io[0x40]&0x80)
-        if not enabled:mode=0
+        self.io[0x44]=ly
+        mode=1 if ly>=144 else (0 if self.ppu_starting and dot<80 else 2 if dot<80 else 3 if dot<252 else 0)
+        enabled=True
         equal=ly==self.io[0x45]
         self.io[0x41]=(self.io[0x41]&0x78)|mode|(4 if equal else 0)
         line=enabled and bool((equal and self.io[0x41]&0x40) or
@@ -304,20 +317,19 @@ class Memory:
                 old_signal=self._timer_signal();self.div_counter=(self.div_counter+1)&0xFFFF;self.io[0x04]=self.div_counter>>8
                 if old_signal and not self._timer_signal():self._timer_increment()
         self._tick_dma(n)
-        start=self.cycles;end=start+n
-        # Visit mode/line edges even when the caller advances a large batch.
+        self.cycles += n
+        if not self.io[0x40]&0x80:return
+        start=self.ppu_cycles;end=start+n
+        # PPU phase is independent of CPU/DIV/DMA and stops with LCDC.7.
         cursor=start
         while cursor<end:
             dot=cursor%456
             boundary=80 if dot<80 else 252 if dot<252 else 456
             cursor=min(end,cursor+boundary-dot)
+            if cursor%456==0:self.ppu_starting=False
             self._update_stat(cursor)
-            # Request only on an enabled PPU's transition into VBlank. Visit
-            # every edge, including one hidden inside a large tick batch.
-            if self.io[0x40]&0x80 and cursor%70224==456*144:
-                self.io[0x0F]|=1
-        self.cycles = end
-        self.io[0x44] = (self.cycles // 456) % 154 # LY approximation for boot-path waits
+            if cursor%70224==456*144:self.io[0x0F]|=1
+        self.ppu_cycles=end%70224
 
 class CPU:
     def __init__(self, memory: Memory):

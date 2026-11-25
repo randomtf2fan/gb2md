@@ -78,7 +78,8 @@ def exploration_state_key(cpu):
                               256 if memory.dma_starting is None else memory.dma_starting,
                               memory.dma_active,memory.dma_source,memory.dma_index,
                               memory.dma_phase,memory.joypad_state))
-    digest.update(bytes([memory.stat_line]))
+    digest.update(bytes([memory.stat_line,memory.ppu_starting]))
+    digest.update(struct.pack(">I",memory.ppu_cycles%70224))
     for region in (memory.vram,memory.wram,memory.oam,memory.hram,memory.io,memory.eram):digest.update(region)
     return digest.digest()
 

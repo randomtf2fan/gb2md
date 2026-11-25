@@ -1512,3 +1512,71 @@ keep the existing 64-page layout.
 This is standard MBC1 support, not MBC1M multicart detection, exhaustive bank-state
 analysis, or proof of complete gameplay coverage. The wiring and zero-translation
 rules follow [Pan Docs' MBC1 description](https://gbdev.io/pandocs/MBC1.html).
+
+## LCD stop/restart and native PPU bus ordering (2026-11-25)
+
+The PPU now has a phase independent of elapsed CPU time. `Memory.cycles` still
+advances for every source instruction/bus cycle and drives elapsed trace/input
+scheduling time. `Memory.ppu_cycles` advances only with LCDC.7 enabled; changing
+that bit resets LY and the display phase. DIV, TIMA and OAM DMA keep running
+while the display clock stops. The native equivalents are `gb_io+$44` and
+`gb_ly_accum`; `gb_tick` skips only its PPU scanline work when LCD is disabled.
+Its CPU-clock accounting, timer and DMA services still run.
+
+`Memory._update_stat()` and `gb_stat_sync` preserve the LY/LYC comparison bit
+and the combined STAT interrupt edge latch while the comparison clock is off.
+Changing LYC during that interval does not recompute the flag or request an
+interrupt. Enabling the display restarts comparison against LY=0 and requests
+STAT only for a new edge; an already pending IF request is retained. The first
+restarted line reports mode 0 before transfer, rather than a normal OAM-scan
+mode 2. `Memory.ppu_starting` / native byte `gb_ppu_starting` ($FF00A5) distinguish
+that line. Regular scanline completion and accelerated enabled-display waits
+clear the startup flag. Writing LY is ignored in both backends, including its
+phase; the previous native write handler incorrectly reset the accumulator.
+
+This is still the coarse 80/252/456-dot mode model. Precise startup offsets,
+variable mode 3 length, line 153's early LY reset, PPU memory restrictions and
+first-frame output blanking remain incomplete. Display enable still presents
+the existing native frame; full hardware startup blanking is not claimed.
+
+There was a separate native scheduling error even after the reference clock
+was fixed: writes to LCDC, STAT or LYC could make an interrupt eligible, then
+native chaining could execute the following DI before servicing it. These
+writes now use `gb_irq_write_barrier`, shared with IF/IE. It commits preceding
+cycles with IRQ entry deferred, preserves the bus operands, and forces an
+instruction-boundary check after the write completes. STAT/LY reads likewise
+commit preceding source cycles before sampling their register; nested bus-call
+IRQ deferral is preserved. This improves ordering without changing source
+instruction costs or using a game-specific timing multiplier. Precise bus
+sequencing for every multi-access instruction remains a broader validation task.
+
+`exploration_state_key()` now includes PPU phase and startup state, in addition
+to CPU time, memory, timer/DMA/banking state and the STAT latch. Two snapshots
+with the same CPU clock but different display restart histories must remain
+distinct. `Memory.__setstate__()` fills missing fields in older reference
+snapshots using their former global phase; that is an approximation, since old
+snapshots did not store the missing stop/restart history. Fresh execution or
+validated ROM-byte coverage imports are preferable for timing tests.
+
+`tests/test_ppu_clock.py` supplies original programs for all four comparison
+transitions, stopped-clock timer/DMA operation, first-line mode/phase, ignored
+LY writes, bulk/small ticks, snapshot identity, and actual native interrupt entry
+before DI for LCDC/STAT/LYC writes. The existing scheduler-helper state matrix
+now expects the old comparison bit and edge latch to remain frozen when off.
+The unmodified Mooneye `stat_lyc_onoff` fixture independently verifies its
+hardware success protocol on Python and native Genesis execution.
+
+Trace "frames" and the optional GB FPS overlay continue to measure elapsed
+CPU-clock equivalents (70,224 T per frame), including LCD-off time. They do not
+count host refreshes or completed LCD images while its clock is stopped.
+Synchronizing PPU accesses has a measurable runtime cost; it is not a speed
+optimization. The fixed video regression advances25.82985 source seconds versus
+29.02349 previously over 72,002 Genesis frames, with20 distinct viewports and no
+traps. This roughly 11% reduction is not isolated from the timing-behavior change;
+future optimization must preserve the new interrupt/read ordering.
+
+Behavioral references: [Pan Docs LCDC](https://github.com/gbdev/pandocs/blob/master/src/LCDC.md),
+[STAT](https://github.com/gbdev/pandocs/blob/master/src/STAT.md), and the
+[Mooneye clock/comparison test](https://github.com/Gekkio/mooneye-test-suite/blob/main/acceptance/ppu/stat_lyc_onoff.s).
+These were used as hardware/debugging references; their code and ROM binaries
+are not bundled with the original regression programs.

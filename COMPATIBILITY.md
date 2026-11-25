@@ -1,5 +1,72 @@
 # GB2MD compatibility status
 
+## LCD stop/restart and interrupt ordering — verified 2026-11-25
+
+The display clock now stops independently of CPU/timer/DMA time, LY resets on
+LCD enable transitions, and the stopped LY/LYC comparison and STAT edge latch
+are retained. The first restarted line starts in mode 0. Native STAT/LY reads
+sample committed source time; LCDC/STAT/LYC writes now arbitrate interrupts
+before the next instruction, fixing the case where a following DI suppressed
+a newly eligible STAT interrupt. Native writes to read-only LY no longer reset
+its scanline phase. No title checks, ROM patches or interpreter were introduced.
+
+- **303/303 unit methods PASS with native integrations enabled**, no skips.
+  Public quick run: **252 PASS / 51 native integration skips**.
+- **62/62 distinct fixtures PASS in fresh Python and actual native execution**:
+  the established 61 plus Mooneye `stat_lyc_onoff`. All 13timer regressions remain
+  passing. Native PASS requires the supported success protocol, not compilation
+  or a visible frame. The eleven individual Blargg CPU native results are still
+  NOT_RUN; their Python results remain PASS.
+- Source-identical primary Mooneye 115: **73 PASS /13 FAIL /2 TIMEOUT /
+  24 UNSUPPORTED /3 NOT_RUN**, versus72 PASS/14 FAIL before this change. Its complete
+  reference survey ran before the shutdown and was retained after source/fixture
+  hashes were verified on resume; all 303 native methods and selected 62fixtures
+  were freshly rerun on Nov25.
+- Deduplicated 129-fixture matrix: **87PythonPASS /13 FAIL /2 TIMEOUT /
+  24 UNSUPPORTED /3 NOT_RUN** at the old limits, or **88 PASS /13 FAIL /1 TIMEOUT /
+  24 UNSUPPORTED /3 NOT_RUN** using the longer standard-MBC1 observations.
+  Native: **62 PASS /67 NOT_RUN**. The fixed 2M-step `bits_ramg` timeout is separately
+  verified PASS with 5M; the other timeout remains the OAM/sprite madness test.
+- Native Tetris replay reaches score 31, GAME OVER and the menu without traps.
+  An extended 16,082-Genesis-frame replay then re-enters gameplay and soft-drops
+  pieces to score 13. Actual SDL input was used, with no guest-memory writes.
+  LINES remained 0: no fresh line-clear or physical-hardware result is claimed.
+- Video regression: 72,002 Genesis frames,20 distinct video viewports, bank 7 and no
+  traps. It advances **25.82985 source seconds versus29.02349 previously**, about
+  **11% less source-clock advancement** at the fixed budget. Correct synchronization
+  has a cost; it has not been isolated from timing-behavior changes. This is not
+  a speed improvement, full-clip verification or audio/hardware test.
+- Current-source Tetris/video/capacity images retain all prior block identities.
+  The capacity graph fits 4,193,788 bytes (516 spare). Public GUI build/cancel and
+  mocked output-folder checks pass offscreen with the external assembler configured;
+  Windows was not tested. All 15 original checkpoints and5,100 fixture files remain intact.
+
+Preliminary shortened validation traces stopped just after the memory tests'
+PASS indication and missed their subsequent RAM-code path. Three trapped at
+$C199; the same unchanged production sources pass when the established 1M trace
+minimum is restored. These negative attempts are retained separately, not counted
+as passes. Protocol completion is not proof of complete later execution coverage;
+ordinary compiler `--steps` behavior is unchanged.
+
+Remaining explicit failures: **8 PPU,3 boot/unused-I/O,1 serial-startup,1 MBC1M**.
+Precise startup offsets, variable mode 3 timing, line 153 LY behavior, PPU access
+restrictions and startup blanking remain incomplete. Other commercial-game
+routes and persistent saves were not newly verified. See [the design](ARCHITECTURE.md).
+
+Reproduce the newly fixed external test using an existing immutable fixture:
+
+```sh
+python3 -m unittest discover -s tests -v
+python3 run_compat_tests.py test_roms/mooneye-test-suite/acceptance/ppu/stat_lyc_onoff.gb \
+  --max-steps 2000000 --compile-native --native-steps 1000000 \
+  --run-native-blastem --blastem /path/to/isolated-blastem-wrapper \
+  --native-frames 3600 --native-timeout 90 \
+  --native-output compat-builds/ppu-retest --json compat-results/ppu-retest.json
+```
+
+Older dated entries below describe their own versions; this section supersedes
+their current counts, clock limitations and byte-identical-image observations.
+
 ## Standard MBC1 banking — completed 2026-11-24
 
 The reference model and native runtime now agree on retained register state,

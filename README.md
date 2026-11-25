@@ -312,6 +312,12 @@ miscompiled. It does not copy the input ROM into output artifacts.
 
 ## Current implementation boundaries
 
+LCD stop/restart now uses an independent display clock, retained STAT comparison
+state, and native PPU read/write synchronization. Mooneye `stat_lyc_onoff` passes
+on both backends. This improves correctness, with a measured synchronization cost:
+the fixed video benchmark advances about 11% less source time. Exact PPU timing and
+game speed remain incomplete; see [current results](COMPATIBILITY.md).
+
 Standard MBC1 cartridges with complete, matching power-of-two ROM headers now
 resolve both ROM windows, disconnected address lines, mode changes, and RAM
 mirrors consistently in Python and native code. Multicart MBC1M wiring remains

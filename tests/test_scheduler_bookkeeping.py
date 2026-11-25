@@ -14,7 +14,11 @@ def stat_vectors():
         stat=mask|mode|(4 if equal else 0)
         line=int(bool(lcd&128 and ((equal and mask&64) or (mode==0 and mask&8) or
                                  (mode==1 and mask&16) or (mode==2 and mask&32))))
-        rows.append(((lcd,ly,lyc,mask|0x87,dot,old_line,flags),(stat,line,flags|(2 if line and not old_line else 0))))
+        # LCD-off freezes the old comparison bit and edge latch, regardless
+        # of the current LY/LYC inputs; it never requests a new interrupt.
+        if not lcd&128:stat=mask|4;line=old_line
+        result_flags=flags if not lcd&128 else flags|(2 if line and not old_line else 0)
+        rows.append(((lcd,ly,lyc,mask|0x87,dot,old_line,flags),(stat,line,result_flags)))
     return rows
 
 
